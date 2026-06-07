@@ -1143,6 +1143,12 @@ pub(super) fn draw_arc_line(
     let start_cos_fp = (start_cos * fp as f32) as i32;
     let end_cos_fp = (end_cos * fp as f32) as i32;
 
+    let cap_start_x_fp = (cap_start_x * fp as f32) as i32;
+    let cap_start_y_fp = (cap_start_y * fp as f32) as i32;
+    let cap_end_x_fp = (cap_end_x * fp as f32) as i32;
+    let cap_end_y_fp = (cap_end_y * fp as f32) as i32;
+    let cap_expansion_fp = ((r_cap * 1.5 + 0.5) * fp as f32) as i32;
+
     for i in 0..num_ranges {
         let (r_start, r_end) = ranges[i];
         
@@ -1176,6 +1182,30 @@ pub(super) fn draw_arc_line(
                     !(p_cross_ve_fp <= 0 && p_cross_vs_fp >= 0)
                 }
             };
+
+            // Fast-path skip for empty pixels not near caps
+            if !is_inside {
+                let dx_diff_start = (dx_fp - cap_start_x_fp).abs();
+                let dy_diff_start = (dy_fp - cap_start_y_fp).abs();
+                let mut near_cap = dx_diff_start <= cap_expansion_fp && dy_diff_start <= cap_expansion_fp;
+                
+                if !near_cap {
+                    let dx_diff_end = (dx_fp - cap_end_x_fp).abs();
+                    let dy_diff_end = (dy_fp - cap_end_y_fp).abs();
+                    near_cap = dx_diff_end <= cap_expansion_fp && dy_diff_end <= cap_expansion_fp;
+                }
+                
+                if !near_cap {
+                    dx_fp += fp;
+                    if !is_full_circle {
+                        p_cross_vs_fp += start_sin_fp * fp;
+                        p_cross_ve_fp += end_sin_fp * fp;
+                        p_dot_vs_fp += start_cos_fp * fp;
+                        p_dot_ve_fp += end_cos_fp * fp;
+                    }
+                    continue;
+                }
+            }
 
             // Fast-path for completely solid pixels (alpha = 1.0)
             let is_solid = is_inside && dist_sq_fp64 <= r_out_solid_sq_fp64 && dist_sq_fp64 >= r_in_solid_sq_fp64;
