@@ -332,7 +332,7 @@ fn gen_corelib(
         "StyledTextItem",
         "ComplexText",
         "Path",
-        "Arc",
+        "ArcSegment",
         "WindowItem",
         "TextInput",
         "Clip",

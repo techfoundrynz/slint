@@ -1001,11 +1001,15 @@ pub(super) fn draw_arc_line(
     }
     let is_full_circle = sweep >= 360.0;
 
-    // Precompute cap centers if needed
+    // Precompute cap centers and unit vectors if needed
     let start_rad = start_angle.to_radians();
     let end_rad = end_angle.to_radians();
-    let cap_start = (r_mid * start_rad.cos(), r_mid * start_rad.sin());
-    let cap_end = (r_mid * end_rad.cos(), r_mid * end_rad.sin());
+    let start_cos = start_rad.cos();
+    let start_sin = start_rad.sin();
+    let end_cos = end_rad.cos();
+    let end_sin = end_rad.sin();
+    let cap_start = (r_mid * start_cos, r_mid * start_sin);
+    let cap_end = (r_mid * end_cos, r_mid * end_sin);
 
     let line_start_x = span.origin.x + extra_left_clip;
     let x_start_phys = (x_center - r_outer - 0.5).floor() as i16;
@@ -1027,19 +1031,21 @@ pub(super) fn draw_arc_line(
             continue;
         }
 
-        let rel_angle = if is_full_circle {
-            0.0
+        let is_inside = if is_full_circle {
+            true
         } else {
-            let angle = dy.atan2(dx);
-            let angle_deg = angle.to_degrees();
-            let mut rel = (angle_deg - start_angle) % 360.0;
-            if rel < 0.0 {
-                rel += 360.0;
+            let vs_cross_p = start_cos * dy - start_sin * dx;
+            let p_cross_ve = dx * end_sin - dy * end_cos;
+            if sweep < 180.0 {
+                vs_cross_p >= 0.0 && p_cross_ve >= 0.0
+            } else {
+                let ve_cross_p = end_cos * dy - end_sin * dx;
+                let p_cross_vs = dx * start_sin - dy * start_cos;
+                !(ve_cross_p >= 0.0 && p_cross_vs >= 0.0)
             }
-            rel
         };
 
-        let dist_to_shape = if is_full_circle || rel_angle <= sweep {
+        let dist_to_shape = if is_inside {
             (dist - r_mid).abs() - stroke_width / 2.0
         } else {
             match arc.stroke_line_cap {
@@ -1049,8 +1055,14 @@ pub(super) fn draw_arc_line(
                     dist_to_start_cap.min(dist_to_end_cap)
                 }
                 i_slint_core::items::LineCap::Square => {
-                    let diff_angle_rad = (rel_angle.min(360.0 - rel_angle)).to_radians();
-                    let dist_to_ray = dist * diff_angle_rad.sin() - stroke_width / 2.0;
+                    let dist_to_ray_unsigned = if dx * start_cos + dy * start_sin > dx * end_cos + dy * end_sin {
+                        // Closer to start cap
+                        (dx * start_sin - dy * start_cos).abs()
+                    } else {
+                        // Closer to end cap
+                        (dx * end_sin - dy * end_cos).abs()
+                    };
+                    let dist_to_ray = dist_to_ray_unsigned - stroke_width / 2.0;
                     let radial_dist = (dist - r_mid).abs() - stroke_width / 2.0;
                     if radial_dist <= 0.0 {
                         dist_to_ray
@@ -1061,8 +1073,13 @@ pub(super) fn draw_arc_line(
                     }
                 }
                 i_slint_core::items::LineCap::Butt | _ => {
-                    let diff_angle_rad = (rel_angle.min(360.0 - rel_angle)).to_radians();
-                    let dist_to_ray = dist * diff_angle_rad.sin();
+                    let dist_to_ray = if dx * start_cos + dy * start_sin > dx * end_cos + dy * end_sin {
+                        // Closer to start cap
+                        (dx * start_sin - dy * start_cos).abs()
+                    } else {
+                        // Closer to end cap
+                        (dx * end_sin - dy * end_cos).abs()
+                    };
                     let radial_dist = (dist - r_mid).abs() - stroke_width / 2.0;
                     if radial_dist <= 0.0 {
                         dist_to_ray

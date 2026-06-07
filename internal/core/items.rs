@@ -1944,7 +1944,7 @@ declare_item_vtable! {
 
 #[cfg(feature = "path")]
 declare_item_vtable! {
-    fn slint_get_ArcVTable() -> ArcVTable for Arc
+    fn slint_get_ArcSegmentVTable() -> ArcSegmentVTable for ArcSegment
 }
 
 declare_item_vtable! {

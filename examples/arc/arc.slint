@@ -1,12 +1,12 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: MIT
 
-import { Button } from "std-widgets.slint";
+import { Button, ComboBox } from "std-widgets.slint";
 
 export component AppWindow inherits Window {
-    title: "Slint Native Arc Primitive Showcase";
+    title: "Slint Native ArcSegment Primitive Showcase";
     preferred-width: 800px;
-    preferred-height: 520px;
+    preferred-height: 580px;
     background: #0f172a; // Slate 900 (premium dark theme)
     default-font-family: "Inter";
 
@@ -15,6 +15,9 @@ export component AppWindow inherits Window {
     
     // Interactive gauge state
     in-out property <float> gauge-value: 0.45;
+
+    // Line cap type selection
+    in-out property <LineCap> cap-type: LineCap.round;
 
     // Spinner animation state
     property <angle> spinner-angle: 0deg;
@@ -39,7 +42,7 @@ export component AppWindow inherits Window {
         VerticalLayout {
             spacing: 5px;
             Text {
-                text: "Slint Arc Primitive Showcase";
+                text: "Slint ArcSegment Primitive Showcase";
                 color: #f8fafc;
                 font-size: 24px;
                 font-weight: 700;
@@ -50,6 +53,32 @@ export component AppWindow inherits Window {
                 color: #94a3b8;
                 font-size: 14px;
                 horizontal-alignment: center;
+            }
+        }
+
+        // Global Controls Row
+        HorizontalLayout {
+            alignment: center;
+            spacing: 15px;
+            Text {
+                text: "Endcap Type:";
+                color: #f1f5f9;
+                font-size: 14px;
+                vertical-alignment: center;
+            }
+            ComboBox {
+                width: 150px;
+                model: ["round", "butt", "square"];
+                current-value: "round";
+                selected(val) => {
+                    if val == "round" {
+                        root.cap-type = LineCap.round;
+                    } else if val == "butt" {
+                        root.cap-type = LineCap.butt;
+                    } else if val == "square" {
+                        root.cap-type = LineCap.square;
+                    }
+                }
             }
         }
 
@@ -83,7 +112,7 @@ export component AppWindow inherits Window {
                     Rectangle {
                         height: 150px;
                         // Background track
-                        Arc {
+                        ArcSegment {
                             width: 130px;
                             height: 130px;
                             stroke: #334155;
@@ -92,14 +121,14 @@ export component AppWindow inherits Window {
                             end-angle: 360deg;
                         }
                         // Foreground fill
-                        Arc {
+                        ArcSegment {
                             width: 130px;
                             height: 130px;
                             stroke: #3b82f6; // Vibrant Blue
                             stroke-width: 12px;
                             start-angle: -90deg; // Start at top
                             end-angle: -90deg + root.progress * 360deg;
-                            stroke-line-cap: LineCap.round;
+                            stroke-line-cap: root.cap-type;
                             
                             animate end-angle {
                                 duration: 250ms;
@@ -165,24 +194,24 @@ export component AppWindow inherits Window {
                         height: 160px;
                         
                         // Track
-                        Arc {
+                        ArcSegment {
                             width: 150px;
                             height: 150px;
                             stroke: #2a3547;
                             stroke-width: 14px;
                             start-angle: 140deg;
                             end-angle: 400deg; // 260 degrees span
-                            stroke-line-cap: LineCap.round;
+                            stroke-line-cap: root.cap-type;
                         }
                         // Active value
-                        Arc {
+                        ArcSegment {
                             width: 150px;
                             height: 150px;
                             stroke: #f59e0b; // Vibrant Amber
                             stroke-width: 14px;
                             start-angle: 140deg;
                             end-angle: 140deg + root.gauge-value * 260deg;
-                            stroke-line-cap: LineCap.round;
+                            stroke-line-cap: root.cap-type;
                             
                             animate end-angle {
                                 duration: 150ms;
@@ -273,14 +302,14 @@ export component AppWindow inherits Window {
                     // Rotating loading spinner
                     Rectangle {
                         height: 150px;
-                        Arc {
+                        ArcSegment {
                             width: 100px;
                             height: 100px;
                             stroke: #10b981; // Beautiful Emerald Green
                             stroke-width: 8px;
                             start-angle: root.spinner-angle;
                             end-angle: root.spinner-angle + 270deg;
-                            stroke-line-cap: LineCap.round;
+                            stroke-line-cap: root.cap-type;
                         }
                     }
 

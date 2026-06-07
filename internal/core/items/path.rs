@@ -198,11 +198,11 @@ impl ItemConsts for Path {
         Path::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
 }
 
-/// The implementation of the `Arc` element
+/// The implementation of the `ArcSegment` element
 #[repr(C)]
 #[derive(FieldOffsets, Default, SlintElement)]
 #[pin]
-pub struct Arc {
+pub struct ArcSegment {
     pub stroke: Property<Brush>,
     pub stroke_width: Property<LogicalLength>,
     pub start_angle: Property<f32>, // angles are represented as f32 in degrees
@@ -211,7 +211,7 @@ pub struct Arc {
     pub cached_rendering_data: CachedRenderingData,
 }
 
-impl Item for Arc {
+impl Item for ArcSegment {
     fn init(self: Pin<&Self>, _self_rc: &ItemRc) {}
 
     fn deinit(self: Pin<&Self>, _window_adapter: &Rc<dyn WindowAdapter>) {}
@@ -297,7 +297,7 @@ impl Item for Arc {
     }
 }
 
-impl RenderArc for Arc {
+impl RenderArc for ArcSegment {
     fn stroke(self: Pin<&Self>) -> Brush {
         self.stroke()
     }
@@ -319,8 +319,8 @@ impl RenderArc for Arc {
     }
 }
 
-impl ItemConsts for Arc {
-    const cached_rendering_data_offset: const_field_offset::FieldOffset<Arc, CachedRenderingData> =
-        Arc::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
+impl ItemConsts for ArcSegment {
+    const cached_rendering_data_offset: const_field_offset::FieldOffset<ArcSegment, CachedRenderingData> =
+        ArcSegment::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
 }
 
