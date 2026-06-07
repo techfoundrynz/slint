@@ -1145,7 +1145,11 @@ pub(super) fn draw_arc_line(
                 green: (((c.green as u32) * cov) / 255) as u8,
                 blue: (((c.blue as u32) * cov) / 255) as u8,
             };
-            line_buffer[idx].blend(col);
+            if col.alpha == 255 {
+                line_buffer[idx] = TargetPixel::from_rgb(col.red, col.green, col.blue);
+            } else {
+                line_buffer[idx].blend(col);
+            }
         }
 
         dx += 1.0;
