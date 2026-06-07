@@ -3171,12 +3171,21 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
 
         let physical_stroke_width = (stroke_width.cast() * self.scale_factor).cast::<i16>();
 
+        let start_angle = arc.start_angle();
+        let end_angle = arc.end_angle();
+        let start_rad = start_angle.to_radians();
+        let end_rad = end_angle.to_radians();
+
         let scene_arc = SceneArc {
             stroke_color: stroke_color.into(),
             stroke_width: physical_stroke_width,
-            start_angle: arc.start_angle(),
-            end_angle: arc.end_angle(),
+            start_angle: start_rad,
+            end_angle: end_rad,
             stroke_line_cap: arc.stroke_line_cap(),
+            start_sin: start_rad.sin(),
+            start_cos: start_rad.cos(),
+            end_sin: end_rad.sin(),
+            end_cos: end_rad.cos(),
         };
 
         self.processor.process_arc(physical_geom, scene_arc);

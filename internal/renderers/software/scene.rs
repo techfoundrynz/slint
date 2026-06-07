@@ -574,5 +574,9 @@ pub struct SceneArc {
     pub start_angle: f32,
     pub end_angle: f32,
     pub stroke_line_cap: i_slint_core::items::LineCap,
+    pub start_sin: f32,
+    pub start_cos: f32,
+    pub end_sin: f32,
+    pub end_cos: f32,
 }
 
