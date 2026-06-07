@@ -347,6 +347,17 @@ pub trait RenderImage {
     fn tiling(self: Pin<&Self>) -> (ImageTiling, ImageTiling);
 }
 
+/// Trait for an item that represents an Arc towards the renderer
+#[cfg(feature = "path")]
+#[allow(missing_docs)]
+pub trait RenderArc {
+    fn stroke(self: Pin<&Self>) -> Brush;
+    fn stroke_width(self: Pin<&Self>) -> LogicalLength;
+    fn start_angle(self: Pin<&Self>) -> f32;
+    fn end_angle(self: Pin<&Self>) -> f32;
+    fn stroke_line_cap(self: Pin<&Self>) -> LineCap;
+}
+
 /// Trait for an item has font properties
 #[allow(missing_docs)]
 pub trait HasFont {
@@ -482,6 +493,8 @@ pub trait ItemRenderer {
     );
     #[cfg(feature = "path")]
     fn draw_path(&mut self, path: Pin<&Path>, _self_rc: &ItemRc, _size: LogicalSize);
+    #[cfg(feature = "path")]
+    fn draw_arc(&mut self, arc: Pin<&dyn RenderArc>, _self_rc: &ItemRc, _size: LogicalSize);
     fn draw_box_shadow(
         &mut self,
         box_shadow: Pin<&BoxShadow>,

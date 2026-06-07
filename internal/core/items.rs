@@ -1942,6 +1942,11 @@ declare_item_vtable! {
     fn slint_get_PathVTable() -> PathVTable for Path
 }
 
+#[cfg(feature = "path")]
+declare_item_vtable! {
+    fn slint_get_ArcVTable() -> ArcVTable for Arc
+}
+
 declare_item_vtable! {
     fn slint_get_MenuItemVTable() -> MenuItemVTable for MenuItem
 }

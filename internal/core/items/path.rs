@@ -16,7 +16,7 @@ use crate::input::{
     FocusEvent, FocusEventResult, InputEventFilterResult, InputEventResult, InternalKeyEvent,
     KeyEventResult, MouseEvent,
 };
-use crate::item_rendering::CachedRenderingData;
+use crate::item_rendering::{CachedRenderingData, RenderArc};
 
 use crate::items::ImageFit;
 use crate::layout::{LayoutInfo, Orientation};
@@ -197,3 +197,130 @@ impl ItemConsts for Path {
     const cached_rendering_data_offset: const_field_offset::FieldOffset<Path, CachedRenderingData> =
         Path::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
 }
+
+/// The implementation of the `Arc` element
+#[repr(C)]
+#[derive(FieldOffsets, Default, SlintElement)]
+#[pin]
+pub struct Arc {
+    pub stroke: Property<Brush>,
+    pub stroke_width: Property<LogicalLength>,
+    pub start_angle: Property<f32>, // angles are represented as f32 in degrees
+    pub end_angle: Property<f32>,
+    pub stroke_line_cap: Property<LineCap>,
+    pub cached_rendering_data: CachedRenderingData,
+}
+
+impl Item for Arc {
+    fn init(self: Pin<&Self>, _self_rc: &ItemRc) {}
+
+    fn deinit(self: Pin<&Self>, _window_adapter: &Rc<dyn WindowAdapter>) {}
+
+    fn layout_info(
+        self: Pin<&Self>,
+        _orientation: Orientation,
+        _cross_axis_constraint: Coord,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+    ) -> LayoutInfo {
+        LayoutInfo { stretch: 1., ..LayoutInfo::default() }
+    }
+
+    fn input_event_filter_before_children(
+        self: Pin<&Self>,
+        _: &MouseEvent,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        _: &mut super::MouseCursor,
+    ) -> InputEventFilterResult {
+        InputEventFilterResult::ForwardAndIgnore
+    }
+
+    fn input_event(
+        self: Pin<&Self>,
+        _: &MouseEvent,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        _: &mut super::MouseCursor,
+    ) -> InputEventResult {
+        InputEventResult::EventIgnored
+    }
+
+    fn capture_key_event(
+        self: Pin<&Self>,
+        _: &InternalKeyEvent,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+    ) -> KeyEventResult {
+        KeyEventResult::EventIgnored
+    }
+
+    fn key_event(
+        self: Pin<&Self>,
+        _: &InternalKeyEvent,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+    ) -> KeyEventResult {
+        KeyEventResult::EventIgnored
+    }
+
+    fn focus_event(
+        self: Pin<&Self>,
+        _: &FocusEvent,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+    ) -> FocusEventResult {
+        FocusEventResult::FocusIgnored
+    }
+
+    fn render(
+        self: Pin<&Self>,
+        backend: &mut ItemRendererRef,
+        self_rc: &ItemRc,
+        size: LogicalSize,
+    ) -> RenderingResult {
+        (*backend).draw_arc(self, self_rc, size);
+        RenderingResult::ContinueRenderingChildren
+    }
+
+    fn bounding_rect(
+        self: core::pin::Pin<&Self>,
+        _window_adapter: &Rc<dyn WindowAdapter>,
+        _self_rc: &ItemRc,
+        geometry: LogicalRect,
+    ) -> LogicalRect {
+        geometry
+    }
+
+    fn clips_children(self: core::pin::Pin<&Self>) -> bool {
+        false
+    }
+}
+
+impl RenderArc for Arc {
+    fn stroke(self: Pin<&Self>) -> Brush {
+        self.stroke()
+    }
+
+    fn stroke_width(self: Pin<&Self>) -> LogicalLength {
+        self.stroke_width()
+    }
+
+    fn start_angle(self: Pin<&Self>) -> f32 {
+        self.start_angle()
+    }
+
+    fn end_angle(self: Pin<&Self>) -> f32 {
+        self.end_angle()
+    }
+
+    fn stroke_line_cap(self: Pin<&Self>) -> LineCap {
+        self.stroke_line_cap()
+    }
+}
+
+impl ItemConsts for Arc {
+    const cached_rendering_data_offset: const_field_offset::FieldOffset<Arc, CachedRenderingData> =
+        Arc::FIELD_OFFSETS.cached_rendering_data().as_unpinned_projection();
+}
+

@@ -17,6 +17,7 @@ use i_slint_core::item_rendering::{
     CachedRenderingData, ItemCache, ItemRenderer, LayerRenderer, RenderBorderRectangle,
     RenderImage, RenderRectangle, RenderText,
 };
+use i_slint_core::item_rendering::RenderArc;
 use i_slint_core::items::{
     self, Clip, FillRule, ImageRendering, ImageTiling, ItemRc, Layer, Opacity, RenderingResult,
 };
@@ -480,6 +481,51 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
             }
         })
     }
+
+    fn draw_arc(&mut self, arc: Pin<&dyn RenderArc>, _item_rc: &ItemRc, size: LogicalSize) {
+        if self.global_alpha_transparent() {
+            return;
+        }
+        let stroke_brush = arc.stroke();
+        let stroke_width = (arc.stroke_width() * self.scale_factor).get();
+        if stroke_brush.is_transparent() || stroke_width <= 0.0 {
+            return;
+        }
+        let geometry = PhysicalRect::from(size * self.scale_factor);
+        let center = geometry.center();
+        let radius = (geometry.size.width.min(geometry.size.height) - stroke_width).max(0.0) / 2.0;
+        if radius <= 0.0 {
+            return;
+        }
+
+        let solidity = if arc.end_angle() >= arc.start_angle() {
+            femtovg::Solidity::Hole
+        } else {
+            femtovg::Solidity::Solid
+        };
+
+        let mut path = femtovg::Path::new();
+        path.arc(
+            center.x,
+            center.y,
+            radius,
+            arc.start_angle().to_radians(),
+            arc.end_angle().to_radians(),
+            solidity,
+        );
+
+        if let Some(mut paint) = self.brush_to_paint(stroke_brush, &path) {
+            paint.set_line_width(stroke_width);
+            paint.set_line_cap(match arc.stroke_line_cap() {
+                items::LineCap::Round => femtovg::LineCap::Round,
+                items::LineCap::Square => femtovg::LineCap::Square,
+                items::LineCap::Butt | _ => femtovg::LineCap::Butt,
+            });
+            paint.set_anti_alias(true);
+            self.canvas.borrow_mut().stroke_path(&path, &paint);
+        }
+    }
+
 
     /// Draws a rectangular shadow shape, which is usually placed underneath another rectangular shape
     /// with an offset (the drop-shadow-offset-x/y). The algorithm follows the HTML Canvas spec 4.12.5.1.18:

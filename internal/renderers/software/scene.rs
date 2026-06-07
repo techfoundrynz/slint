@@ -22,6 +22,7 @@ pub struct SceneVectors {
     pub linear_gradients: Vec<LinearGradientCommand>,
     pub radial_gradients: Vec<RadialGradientCommand>,
     pub conic_gradients: Vec<ConicGradientCommand>,
+    pub arcs: Vec<SceneArc>,
 }
 
 pub struct Scene {
@@ -288,6 +289,10 @@ pub enum SceneCommand {
     /// conic_gradient_index is an index in the [`SceneVectors::conic_gradients`] array
     ConicGradient {
         conic_gradient_index: u16,
+    },
+    /// arc_index is an index in the [`SceneVectors::arcs`] array
+    Arc {
+        arc_index: u16,
     },
 }
 
@@ -561,3 +566,13 @@ pub struct ConicGradientCommand {
     pub center_x: f32,
     pub center_y: f32,
 }
+
+#[derive(Debug)]
+pub struct SceneArc {
+    pub stroke_color: PremultipliedRgbaColor,
+    pub stroke_width: PhysicalLength,
+    pub start_angle: f32,
+    pub end_angle: f32,
+    pub stroke_line_cap: i_slint_core::items::LineCap,
+}
+

@@ -23,6 +23,8 @@ use crate::item_rendering::{
 use crate::item_tree::{ItemTreeRc, ItemTreeWeak, ItemVisitorResult};
 #[cfg(feature = "path")]
 use crate::items::Path;
+#[cfg(feature = "path")]
+use crate::item_rendering::RenderArc;
 use crate::items::{BoxShadow, Clip, ItemRc, ItemRef, Layer, Opacity, RenderingResult, TextInput};
 use crate::lengths::{
     ItemTransform, LogicalBorderRadius, LogicalLength, LogicalPoint, LogicalPx, LogicalRect,
@@ -670,6 +672,19 @@ impl<T: ItemRenderer + ItemRendererFeatures> ItemRenderer for PartialRenderer<'_
     forward_rendering_call!(fn draw_text_input(TextInput));
     #[cfg(feature = "path")]
     forward_rendering_call!(fn draw_path(Path));
+    #[cfg(feature = "path")]
+    fn draw_arc(
+        &mut self,
+        obj: Pin<&dyn RenderArc>,
+        item_rc: &ItemRc,
+        size: LogicalSize,
+    ) {
+        let item = item_rc.borrow();
+        let rendering_data = item.cached_rendering_data_offset();
+        Self::do_rendering(&self.cache, &rendering_data, item_rc, || {
+            self.actual_renderer.draw_arc(obj, item_rc, size);
+        });
+    }
     forward_rendering_call!(fn draw_box_shadow(BoxShadow));
 
     forward_rendering_call!(fn visit_clip(Clip) -> RenderingResult);

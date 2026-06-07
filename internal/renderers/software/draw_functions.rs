@@ -959,6 +959,135 @@ impl From<Rgb565Pixel> for Rgb8Pixel {
     }
 }
 
+#[cfg(feature = "path")]
+pub(super) fn draw_arc_line(
+    span: &PhysicalRect,
+    line: PhysicalLength,
+    arc: &super::SceneArc,
+    line_buffer: &mut [impl TargetPixel],
+    extra_left_clip: i16,
+    _extra_right_clip: i16,
+) {
+    let stroke_width = arc.stroke_width.get() as f32;
+    if stroke_width <= 0.0 {
+        return;
+    }
+
+    let w = span.size.width as f32;
+    let h = span.size.height as f32;
+    let r_mid = (w.min(h) - stroke_width).max(0.0) / 2.0;
+    let r_outer = r_mid + stroke_width / 2.0;
+    if r_outer <= 0.0 {
+        return;
+    }
+
+    let x_center = span.origin.x as f32 + w / 2.0;
+    let y_center = span.origin.y as f32 + h / 2.0;
+
+    let dy = (line.get() as f32 + 0.5) - y_center;
+    if dy.abs() >= r_outer + 0.5 {
+        return;
+    }
+
+    // Normalize start/end angles so that sweep is positive
+    let mut start_angle = arc.start_angle;
+    let mut end_angle = arc.end_angle;
+    if end_angle < start_angle {
+        core::mem::swap(&mut start_angle, &mut end_angle);
+    }
+    let sweep = end_angle - start_angle;
+    if sweep <= 0.0 {
+        return;
+    }
+    let is_full_circle = sweep >= 360.0;
+
+    // Precompute cap centers if needed
+    let start_rad = start_angle.to_radians();
+    let end_rad = end_angle.to_radians();
+    let cap_start = (r_mid * start_rad.cos(), r_mid * start_rad.sin());
+    let cap_end = (r_mid * end_rad.cos(), r_mid * end_rad.sin());
+
+    let line_start_x = span.origin.x + extra_left_clip;
+    let x_start_phys = (x_center - r_outer - 0.5).floor() as i16;
+    let x_end_phys = (x_center + r_outer + 0.5).ceil() as i16;
+
+    let start_idx = (x_start_phys - line_start_x).max(0) as usize;
+    let end_idx = (x_end_phys - line_start_x).min(line_buffer.len() as i16).max(0) as usize;
+
+    if start_idx >= end_idx {
+        return;
+    }
+
+    for idx in start_idx..end_idx {
+        let x_phys = line_start_x + idx as i16;
+        let dx = (x_phys as f32 + 0.5) - x_center;
+        let dist_sq = dx * dx + dy * dy;
+        let dist = dist_sq.sqrt();
+        if dist <= 0.0 {
+            continue;
+        }
+
+        let rel_angle = if is_full_circle {
+            0.0
+        } else {
+            let angle = dy.atan2(dx);
+            let angle_deg = angle.to_degrees();
+            let mut rel = (angle_deg - start_angle) % 360.0;
+            if rel < 0.0 {
+                rel += 360.0;
+            }
+            rel
+        };
+
+        let dist_to_shape = if is_full_circle || rel_angle <= sweep {
+            (dist - r_mid).abs() - stroke_width / 2.0
+        } else {
+            match arc.stroke_line_cap {
+                i_slint_core::items::LineCap::Round => {
+                    let dist_to_start_cap = ((dx - cap_start.0).powi(2) + (dy - cap_start.1).powi(2)).sqrt() - stroke_width / 2.0;
+                    let dist_to_end_cap = ((dx - cap_end.0).powi(2) + (dy - cap_end.1).powi(2)).sqrt() - stroke_width / 2.0;
+                    dist_to_start_cap.min(dist_to_end_cap)
+                }
+                i_slint_core::items::LineCap::Square => {
+                    let diff_angle_rad = (rel_angle.min(360.0 - rel_angle)).to_radians();
+                    let dist_to_ray = dist * diff_angle_rad.sin() - stroke_width / 2.0;
+                    let radial_dist = (dist - r_mid).abs() - stroke_width / 2.0;
+                    if radial_dist <= 0.0 {
+                        dist_to_ray
+                    } else if dist_to_ray <= 0.0 {
+                        radial_dist
+                    } else {
+                        (dist_to_ray * dist_to_ray + radial_dist * radial_dist).sqrt()
+                    }
+                }
+                i_slint_core::items::LineCap::Butt | _ => {
+                    let diff_angle_rad = (rel_angle.min(360.0 - rel_angle)).to_radians();
+                    let dist_to_ray = dist * diff_angle_rad.sin();
+                    let radial_dist = (dist - r_mid).abs() - stroke_width / 2.0;
+                    if radial_dist <= 0.0 {
+                        dist_to_ray
+                    } else {
+                        (dist_to_ray * dist_to_ray + radial_dist * radial_dist).sqrt()
+                    }
+                }
+            }
+        };
+
+        let coverage = (0.5 - dist_to_shape).clamp(0.0, 1.0);
+        if coverage > 0.0 {
+            let c = arc.stroke_color;
+            let cov = (coverage * 255.0) as u32;
+            let col = PremultipliedRgbaColor {
+                alpha: (((c.alpha as u32) * cov) / 255) as u8,
+                red: (((c.red as u32) * cov) / 255) as u8,
+                green: (((c.green as u32) * cov) / 255) as u8,
+                blue: (((c.blue as u32) * cov) / 255) as u8,
+            };
+            line_buffer[idx].blend(col);
+        }
+    }
+}
+
 #[test]
 fn rgb565() {
     let pix565 = Rgb565Pixel::from_rgb(0xff, 0x25, 0);

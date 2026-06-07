@@ -1397,6 +1397,18 @@ fn render_window_frame_by_line(
                                     extra_right_clip,
                                 );
                             }
+                            #[cfg(feature = "path")]
+                            SceneCommand::Arc { arc_index } => {
+                                let arc = &scene.vectors.arcs[arc_index as usize];
+                                draw_functions::draw_arc_line(
+                                    &PhysicalRect { origin: span.pos, size: span.size },
+                                    scene.current_line,
+                                    arc,
+                                    range_buffer,
+                                    extra_left_clip,
+                                    extra_right_clip,
+                                );
+                            }
                         }
                     }
                 },
@@ -1555,6 +1567,12 @@ trait ProcessScene {
         stroke_line_cap: i_slint_core::items::LineCap,
         stroke_line_join: i_slint_core::items::LineJoin,
         stroke_miter_limit: f32,
+    );
+    #[cfg(feature = "path")]
+    fn process_arc(
+        &mut self,
+        geometry: PhysicalRect,
+        arc: SceneArc,
     );
 }
 
@@ -1970,6 +1988,20 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
             self.buffer,
         );
     }
+
+    #[cfg(feature = "path")]
+    fn process_arc(&mut self, geometry: PhysicalRect, arc: SceneArc) {
+        self.foreach_ranges(&geometry, |line, buffer, extra_left_clip, extra_right_clip| {
+            draw_functions::draw_arc_line(
+                &geometry,
+                PhysicalLength::new(line),
+                &arc,
+                buffer,
+                extra_left_clip,
+                extra_right_clip,
+            );
+        });
+    }
 }
 
 #[derive(Default)]
@@ -2132,6 +2164,21 @@ impl ProcessScene for PrepareScene {
     ) {
         // Path rendering is not supported in line-by-line mode (PrepareScene/render_by_line)
         // Only works with buffer-based rendering (RenderToBuffer)
+    }
+
+    #[cfg(feature = "path")]
+    fn process_arc(&mut self, geometry: PhysicalRect, arc: SceneArc) {
+        let size = geometry.size;
+        if !size.is_empty() {
+            let arc_index = self.vectors.arcs.len() as u16;
+            self.vectors.arcs.push(arc);
+            self.items.push(SceneItem {
+                pos: geometry.origin,
+                size,
+                z: self.items.len() as u16,
+                command: SceneCommand::Arc { arc_index },
+            });
+        }
     }
 }
 
@@ -3094,6 +3141,47 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
             }
         }
     }
+
+    #[cfg(feature = "path")]
+    fn draw_arc(
+        &mut self,
+        arc: Pin<&dyn i_slint_core::item_rendering::RenderArc>,
+        _self_rc: &ItemRc,
+        size: LogicalSize,
+    ) {
+        let geom = LogicalRect::from(size);
+        if !self.should_draw(&geom) {
+            return;
+        }
+
+        let stroke_brush = arc.stroke();
+        let stroke_width = arc.stroke_width();
+        if stroke_brush.is_transparent() || stroke_width.get() <= 0.0 {
+            return;
+        }
+
+        let stroke_color = self.alpha_color(stroke_brush.color());
+        if stroke_color.alpha() == 0 {
+            return;
+        }
+
+        let physical_geom_f32 =
+            geom.translate(self.current_state.offset.to_vector()).cast() * self.scale_factor;
+        let physical_geom = physical_geom_f32.round().cast().transformed(self.rotation);
+
+        let physical_stroke_width = (stroke_width.cast() * self.scale_factor).cast::<i16>();
+
+        let scene_arc = SceneArc {
+            stroke_color: stroke_color.into(),
+            stroke_width: physical_stroke_width,
+            start_angle: arc.start_angle(),
+            end_angle: arc.end_angle(),
+            stroke_line_cap: arc.stroke_line_cap(),
+        };
+
+        self.processor.process_arc(physical_geom, scene_arc);
+    }
+
 
     fn draw_box_shadow(
         &mut self,

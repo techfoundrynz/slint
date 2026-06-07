@@ -1,0 +1,298 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: MIT
+
+import { Button } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    title: "Slint Native Arc Primitive Showcase";
+    preferred-width: 800px;
+    preferred-height: 520px;
+    background: #0f172a; // Slate 900 (premium dark theme)
+    default-font-family: "Inter";
+
+    // Global state for progress
+    in-out property <float> progress: 0.65;
+    
+    // Interactive gauge state
+    in-out property <float> gauge-value: 0.45;
+
+    // Spinner animation state
+    property <angle> spinner-angle: 0deg;
+    
+    // Animate spinner angle continuously
+    animate spinner-angle {
+        duration: 1.5s;
+        iteration-count: -1;
+        easing: linear;
+    }
+
+    // Initialize/start the spinner animation by binding spinner-angle to a helper that cycles
+    init => {
+        spinner-angle = 360deg;
+    }
+
+    VerticalLayout {
+        padding: 30px;
+        spacing: 25px;
+
+        // Header section
+        VerticalLayout {
+            spacing: 5px;
+            Text {
+                text: "Slint Arc Primitive Showcase";
+                color: #f8fafc;
+                font-size: 24px;
+                font-weight: 700;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: "High-performance vector graphics rendering with rounded endcaps";
+                color: #94a3b8;
+                font-size: 14px;
+                horizontal-alignment: center;
+            }
+        }
+
+        // Widgets cards layout
+        HorizontalLayout {
+            spacing: 20px;
+
+            // Card 1: Progress Ring
+            Rectangle {
+                background: #1e293b;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: #334155;
+                width: 230px;
+                height: 320px;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 15px;
+                    alignment: space-between;
+
+                    Text {
+                        text: "Progress Ring";
+                        color: #f1f5f9;
+                        font-size: 16px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                    }
+
+                    // The Ring Container
+                    Rectangle {
+                        height: 150px;
+                        // Background track
+                        Arc {
+                            width: 130px;
+                            height: 130px;
+                            stroke: #334155;
+                            stroke-width: 12px;
+                            start-angle: 0deg;
+                            end-angle: 360deg;
+                        }
+                        // Foreground fill
+                        Arc {
+                            width: 130px;
+                            height: 130px;
+                            stroke: #3b82f6; // Vibrant Blue
+                            stroke-width: 12px;
+                            start-angle: -90deg; // Start at top
+                            end-angle: -90deg + root.progress * 360deg;
+                            stroke-line-cap: LineCap.round;
+                            
+                            animate end-angle {
+                                duration: 250ms;
+                                easing: ease-out-quad;
+                            }
+                        }
+                        
+                        // Centered percentage text
+                        Text {
+                            text: Math.round(root.progress * 100) + "%";
+                            color: #f8fafc;
+                            font-size: 22px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    // Interactive controls
+                    HorizontalLayout {
+                        spacing: 15px;
+                        alignment: center;
+                        Button {
+                            text: "-10%";
+                            clicked => {
+                                root.progress = Math.max(0.0, root.progress - 0.10);
+                            }
+                        }
+                        Button {
+                            text: "+10%";
+                            clicked => {
+                                root.progress = Math.min(1.0, root.progress + 0.10);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Card 2: Speedometer / Gauge
+            Rectangle {
+                background: #1e293b;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: #334155;
+                width: 250px;
+                height: 320px;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 10px;
+                    alignment: space-between;
+
+                    Text {
+                        text: "Interactive Gauge";
+                        color: #f1f5f9;
+                        font-size: 16px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                    }
+
+                    // Gauge Display
+                    Rectangle {
+                        height: 160px;
+                        
+                        // Track
+                        Arc {
+                            width: 150px;
+                            height: 150px;
+                            stroke: #2a3547;
+                            stroke-width: 14px;
+                            start-angle: 140deg;
+                            end-angle: 400deg; // 260 degrees span
+                            stroke-line-cap: LineCap.round;
+                        }
+                        // Active value
+                        Arc {
+                            width: 150px;
+                            height: 150px;
+                            stroke: #f59e0b; // Vibrant Amber
+                            stroke-width: 14px;
+                            start-angle: 140deg;
+                            end-angle: 140deg + root.gauge-value * 260deg;
+                            stroke-line-cap: LineCap.round;
+                            
+                            animate end-angle {
+                                duration: 150ms;
+                                easing: ease-out-quad;
+                            }
+                        }
+
+                        // Touch area for dragging/clicking to adjust value
+                        ta := TouchArea {
+                            width: 150px;
+                            height: 150px;
+
+                            pointer-event(event) => {
+                                if event.kind == PointerEventKind.down || event.kind == PointerEventKind.move {
+                                    // Calculate angle relative to center
+                                    let dx = self.mouse-x - self.width / 2;
+                                    let dy = self.mouse-y - self.height / 2;
+                                    let mouse-angle = atan2(dy / 1px, dx / 1px);
+                                    
+                                    // Convert radian angle (-PI to PI) to degrees (0 to 360)
+                                    let angle-deg = (mouse-angle / 1rad * 180 / 3.14159 + 360).mod(360);
+                                    
+                                    // Map 140deg-400deg range to 0.0-1.0
+                                    let adjusted-angle = (angle-deg - 140 + 360).mod(360);
+                                    if adjusted-angle <= 260 {
+                                        root.gauge-value = adjusted-angle / 260;
+                                    } else if adjusted-angle > 310 {
+                                        root.gauge-value = 0.0;
+                                    } else {
+                                        root.gauge-value = 1.0;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Display text
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: Math.round(root.gauge-value * 220) + " km/h";
+                                color: #f8fafc;
+                                font-size: 20px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Speed";
+                                color: #64748b;
+                                font-size: 11px;
+                                font-weight: 500;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: "Drag or click the gauge to adjust";
+                        color: #64748b;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            // Card 3: Indeterminate Spinner
+            Rectangle {
+                background: #1e293b;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: #334155;
+                width: 230px;
+                height: 320px;
+
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 15px;
+                    alignment: space-between;
+
+                    Text {
+                        text: "Loading Spinner";
+                        color: #f1f5f9;
+                        font-size: 16px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                    }
+
+                    // Rotating loading spinner
+                    Rectangle {
+                        height: 150px;
+                        Arc {
+                            width: 100px;
+                            height: 100px;
+                            stroke: #10b981; // Beautiful Emerald Green
+                            stroke-width: 8px;
+                            start-angle: root.spinner-angle;
+                            end-angle: root.spinner-angle + 270deg;
+                            stroke-line-cap: LineCap.round;
+                        }
+                    }
+
+                    Text {
+                        text: "Uses looping angle interpolation. Ideal for busy indicators.";
+                        color: #64748b;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+}

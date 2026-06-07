@@ -2405,6 +2405,24 @@ export component Path {
     //-default_size_binding:expands_to_parent_geometry
 }
 
+/// The `Arc` element describes a circular arc shape with customizable start/end angles,
+/// thickness, and endcap styling.
+export component Arc {
+    /// The color for drawing the outline of the arc.
+    in property <brush> stroke: transparent;
+    /// The thickness of the arc's outline.
+    in property <length> stroke-width: 0px;
+    /// The starting angle of the arc, in degrees. 0 degrees is at 3 o'clock (right) and increases clockwise.
+    in property <angle> start-angle: 0deg;
+    /// The ending angle of the arc, in degrees.
+    in property <angle> end-angle: 0deg;
+    /// The style of the ends of the arc's outline.
+    in property <LineCap> stroke-line-cap: LineCap.butt;
+
+    //-default_size_binding:expands_to_parent_geometry
+}
+
+
 component Tab {
     in property <string> title;
 }

@@ -12,7 +12,7 @@ use i_slint_core::graphics::euclid::num::Zero;
 use i_slint_core::graphics::euclid::{self, Vector2D};
 use i_slint_core::item_rendering::{
     CachedRenderingData, ItemCache, ItemRenderer, ItemRendererFeatures, LayerRenderer, RenderImage,
-    RenderText,
+    RenderText, RenderArc,
 };
 use i_slint_core::items::{ImageFit, ImageRendering, ItemRc, Layer, Opacity, RenderingResult};
 use i_slint_core::lengths::{
@@ -815,6 +815,48 @@ impl ItemRenderer for SkiaItemRenderer<'_> {
             border_paint.set_stroke_miter(path.stroke_miter_limit());
             border_paint.set_stroke(true);
             self.canvas.draw_path(&skpath, &border_paint);
+        }
+    }
+
+    fn draw_arc(
+        &mut self,
+        arc: Pin<&dyn RenderArc>,
+        _item_rc: &i_slint_core::items::ItemRc,
+        size: LogicalSize,
+    ) {
+        let stroke_brush = arc.stroke();
+        let stroke_width = (arc.stroke_width() * self.scale_factor).get();
+        if stroke_brush.is_transparent() || stroke_width <= 0.0 {
+            return;
+        }
+
+        let geometry = PhysicalRect::from(size * self.scale_factor);
+        let center = geometry.center();
+        let radius = (geometry.size.width.min(geometry.size.height) - stroke_width).max(0.0) / 2.0;
+        if radius <= 0.0 {
+            return;
+        }
+
+        let oval = skia_safe::Rect::from_xywh(
+            center.x - radius,
+            center.y - radius,
+            radius * 2.0,
+            radius * 2.0,
+        );
+
+        let start_angle = arc.start_angle();
+        let sweep_angle = arc.end_angle() - start_angle;
+
+        if let Some(mut paint) = self.brush_to_paint(stroke_brush, geometry.width_length(), geometry.height_length()) {
+            paint.set_anti_alias(true);
+            paint.set_style(skia_safe::PaintStyle::Stroke);
+            paint.set_stroke_width(stroke_width);
+            paint.set_stroke_cap(match arc.stroke_line_cap() {
+                i_slint_core::items::LineCap::Round => skia_safe::PaintCap::Round,
+                i_slint_core::items::LineCap::Square => skia_safe::PaintCap::Square,
+                i_slint_core::items::LineCap::Butt | _ => skia_safe::PaintCap::Butt,
+            });
+            self.canvas.draw_arc(oval, start_angle, sweep_angle, false, &paint);
         }
     }
 
