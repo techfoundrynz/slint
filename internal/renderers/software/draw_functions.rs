@@ -981,11 +981,16 @@ pub(super) fn draw_arc_line(
         return;
     }
 
+    let r_out_bound = r_outer + 0.5;
+    let r_in_bound = (r_mid - stroke_width / 2.0 - 0.5).max(0.0);
+    let r_out_sq = r_out_bound * r_out_bound;
+    let r_in_sq = r_in_bound * r_in_bound;
+
     let x_center = span.origin.x as f32 + w / 2.0;
     let y_center = span.origin.y as f32 + h / 2.0;
 
     let dy = (line.get() as f32 + 0.5) - y_center;
-    if dy.abs() >= r_outer + 0.5 {
+    if dy.abs() >= r_out_bound {
         return;
     }
 
@@ -1012,8 +1017,8 @@ pub(super) fn draw_arc_line(
     let cap_end = (r_mid * end_cos, r_mid * end_sin);
 
     let line_start_x = span.origin.x + extra_left_clip;
-    let x_start_phys = (x_center - r_outer - 0.5).floor() as i16;
-    let x_end_phys = (x_center + r_outer + 0.5).ceil() as i16;
+    let x_start_phys = (x_center - r_out_bound).floor() as i16;
+    let x_end_phys = (x_center + r_out_bound).ceil() as i16;
 
     let start_idx = (x_start_phys - line_start_x).max(0) as usize;
     let end_idx = (x_end_phys - line_start_x).min(line_buffer.len() as i16).max(0) as usize;
@@ -1026,6 +1031,12 @@ pub(super) fn draw_arc_line(
         let x_phys = line_start_x + idx as i16;
         let dx = (x_phys as f32 + 0.5) - x_center;
         let dist_sq = dx * dx + dy * dy;
+
+        // Fast-path bounding check: skip heavy math/sqrt if pixel is entirely outside the arc ring
+        if dist_sq > r_out_sq || dist_sq < r_in_sq {
+            continue;
+        }
+
         let dist = dist_sq.sqrt();
         if dist <= 0.0 {
             continue;
