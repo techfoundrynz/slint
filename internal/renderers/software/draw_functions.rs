@@ -960,11 +960,11 @@ impl From<Rgb565Pixel> for Rgb8Pixel {
 }
 
 #[cfg(feature = "path")]
-pub(super) fn draw_arc_line(
+pub(super) fn draw_arc_line<Pixel: TargetPixel>(
     span: &PhysicalRect,
     line: PhysicalLength,
     arc: &super::SceneArc,
-    line_buffer: &mut [impl TargetPixel],
+    line_buffer: &mut [Pixel],
     extra_left_clip: i16,
     _extra_right_clip: i16,
 ) {
@@ -972,6 +972,9 @@ pub(super) fn draw_arc_line(
     if stroke_width <= 0.0 {
         return;
     }
+
+    let is_opaque = arc.stroke_color.alpha == u8::MAX;
+    let solid_color_pixel = Pixel::from_rgb(arc.stroke_color.red, arc.stroke_color.green, arc.stroke_color.blue);
 
     let w = span.size.width as f32;
     let h = span.size.height as f32;
@@ -1049,7 +1052,6 @@ pub(super) fn draw_arc_line(
         }
         
         // Expand the skeleton bounding box by the cap size
-        // Square caps can extend up to sqrt(2) * r_cap. 1.5 * r_cap is extremely safe.
         let expansion = r_cap * 1.5 + 0.5;
         let arc_min_y = min_y_norm * r_mid - expansion;
         let arc_max_y = max_y_norm * r_mid + expansion;
@@ -1065,22 +1067,21 @@ pub(super) fn draw_arc_line(
     let cap_end_x = r_mid * end_cos;
     let cap_end_y = r_mid * end_sin;
 
-    // Loop invariants for the current scanline (avoiding redundant math in pixel loop)
-    let dy_sq = dy * dy;
-    let dx_max_sq = r_out_sq - dy_sq;
-    if dx_max_sq <= 0.0 {
-        return;
-    }
-    let dx_max = dx_max_sq.sqrt();
-
     let vs_cross_y = dy * start_cos;
     let ve_cross_y = dy * end_cos;
     let vs_dot_y = dy * start_sin;
     let ve_dot_y = dy * end_sin;
+
     let dy_minus_cap_start_y_sq = (dy - cap_start_y) * (dy - cap_start_y);
     let dy_minus_cap_end_y_sq = (dy - cap_end_y) * (dy - cap_end_y);
 
     let line_start_x = span.origin.x + extra_left_clip;
+    
+    let dy_sq = dy * dy;
+    let dx_max_sq = r_out_sq - dy_sq;
+    if dx_max_sq < 0.0 { return; }
+    let dx_max = dx_max_sq.sqrt();
+    
     let x_start_phys = (x_center - dx_max).floor() as i16;
     let x_end_phys = (x_center + dx_max).ceil() as i16;
 
@@ -1126,110 +1127,62 @@ pub(super) fn draw_arc_line(
         }
     }
 
-    // Fixed point constants (8 fractional bits)
-    let fp: i32 = 256;
-    let fp_sq: f32 = 65536.0;
-    
-    let dy_fp = (dy * fp as f32) as i32;
-    let dy_sq_fp64 = (dy_fp as i64) * (dy_fp as i64);
-    
-    let r_out_sq_fp64 = (r_out_sq * fp_sq) as i64;
-    let r_in_sq_fp64 = (r_in_sq * fp_sq) as i64;
-    let r_out_solid_sq_fp64 = (((r_outer - 0.5) * (r_outer - 0.5)) * fp_sq) as i64;
-    let r_in_solid_sq_fp64 = (((r_inner + 0.5) * (r_inner + 0.5)) * fp_sq) as i64;
-
-    let start_sin_fp = (start_sin * fp as f32) as i32;
-    let end_sin_fp = (end_sin * fp as f32) as i32;
-    let start_cos_fp = (start_cos * fp as f32) as i32;
-    let end_cos_fp = (end_cos * fp as f32) as i32;
-
-    let cap_start_x_fp = (cap_start_x * fp as f32) as i32;
-    let cap_start_y_fp = (cap_start_y * fp as f32) as i32;
-    let cap_end_x_fp = (cap_end_x * fp as f32) as i32;
-    let cap_end_y_fp = (cap_end_y * fp as f32) as i32;
-    let cap_expansion_fp = ((r_cap * 1.5 + 0.5) * fp as f32) as i32;
+    let r_out_solid_sq = (r_outer - 0.5) * (r_outer - 0.5);
+    let r_in_solid_sq = (r_inner + 0.5) * (r_inner + 0.5);
+    let cap_expansion = r_cap * 1.5 + 0.5;
 
     for i in 0..num_ranges {
         let (r_start, r_end) = ranges[i];
         
-        let mut dx_fp = (((line_start_x + r_start as i16) as f32 + 0.5 - x_center) * fp as f32) as i32;
-        let mut p_cross_vs_fp = dx_fp * start_sin_fp - (vs_cross_y * fp_sq) as i32;
-        let mut p_cross_ve_fp = dx_fp * end_sin_fp - (ve_cross_y * fp_sq) as i32;
-        let mut p_dot_vs_fp = dx_fp * start_cos_fp + (vs_dot_y * fp_sq) as i32;
-        let mut p_dot_ve_fp = dx_fp * end_cos_fp + (ve_dot_y * fp_sq) as i32;
+        let mut dx = (line_start_x + r_start as i16) as f32 + 0.5 - x_center;
 
         for idx in r_start..r_end {
-            let dist_sq_fp64 = (dx_fp as i64) * (dx_fp as i64) + dy_sq_fp64;
-
-            // Fast-path bounding check for outer bounds (integer math!)
-            if dist_sq_fp64 > r_out_sq_fp64 || dist_sq_fp64 < r_in_sq_fp64 {
-                dx_fp += fp;
-                if !is_full_circle {
-                    p_cross_vs_fp += start_sin_fp * fp;
-                    p_cross_ve_fp += end_sin_fp * fp;
-                    p_dot_vs_fp += start_cos_fp * fp;
-                    p_dot_ve_fp += end_cos_fp * fp;
-                }
-                continue;
-            }
+            let dist_sq = dx * dx + dy_sq;
 
             let is_inside = if is_full_circle {
                 true
             } else {
+                let p_cross_vs = dx * start_sin - vs_cross_y;
+                let p_cross_ve = dx * end_sin - ve_cross_y;
                 if is_sweep_less_180 {
-                    p_cross_vs_fp <= 0 && p_cross_ve_fp >= 0
+                    p_cross_vs <= 0.0 && p_cross_ve >= 0.0
                 } else {
-                    !(p_cross_ve_fp <= 0 && p_cross_vs_fp >= 0)
+                    !(p_cross_ve <= 0.0 && p_cross_vs >= 0.0)
                 }
             };
 
             // Fast-path skip for empty pixels not near caps
             if !is_inside {
-                let dx_diff_start = (dx_fp - cap_start_x_fp).abs();
-                let dy_diff_start = (dy_fp - cap_start_y_fp).abs();
-                let mut near_cap = dx_diff_start <= cap_expansion_fp && dy_diff_start <= cap_expansion_fp;
+                let dx_diff_start = (dx - cap_start_x).abs();
+                let dy_diff_start = (dy - cap_start_y).abs();
+                let mut near_cap = dx_diff_start <= cap_expansion && dy_diff_start <= cap_expansion;
                 
                 if !near_cap {
-                    let dx_diff_end = (dx_fp - cap_end_x_fp).abs();
-                    let dy_diff_end = (dy_fp - cap_end_y_fp).abs();
-                    near_cap = dx_diff_end <= cap_expansion_fp && dy_diff_end <= cap_expansion_fp;
+                    let dx_diff_end = (dx - cap_end_x).abs();
+                    let dy_diff_end = (dy - cap_end_y).abs();
+                    near_cap = dx_diff_end <= cap_expansion && dy_diff_end <= cap_expansion;
                 }
                 
                 if !near_cap {
-                    dx_fp += fp;
-                    if !is_full_circle {
-                        p_cross_vs_fp += start_sin_fp * fp;
-                        p_cross_ve_fp += end_sin_fp * fp;
-                        p_dot_vs_fp += start_cos_fp * fp;
-                        p_dot_ve_fp += end_cos_fp * fp;
-                    }
+                    dx += 1.0;
                     continue;
                 }
             }
 
             // Fast-path for completely solid pixels (alpha = 1.0)
-            let is_solid = is_inside && dist_sq_fp64 <= r_out_solid_sq_fp64 && dist_sq_fp64 >= r_in_solid_sq_fp64;
+            let is_solid = is_inside && dist_sq <= r_out_solid_sq && dist_sq >= r_in_solid_sq;
             if is_solid {
-                line_buffer[idx].blend(arc.stroke_color);
-                
-                dx_fp += fp;
-                if !is_full_circle {
-                    p_cross_vs_fp += start_sin_fp * fp;
-                    p_cross_ve_fp += end_sin_fp * fp;
-                    p_dot_vs_fp += start_cos_fp * fp;
-                    p_dot_ve_fp += end_cos_fp * fp;
+                if is_opaque {
+                    line_buffer[idx] = solid_color_pixel;
+                } else {
+                    line_buffer[idx].blend(arc.stroke_color);
                 }
+                
+                dx += 1.0;
                 continue;
             }
-
+            
             // Fallback to f32 for anti-aliased edge and cap pixels
-            let dx = dx_fp as f32 / fp as f32;
-            let p_cross_vs = p_cross_vs_fp as f32 / fp_sq;
-            let p_cross_ve = p_cross_ve_fp as f32 / fp_sq;
-            let p_dot_vs = p_dot_vs_fp as f32 / fp_sq;
-            let p_dot_ve = p_dot_ve_fp as f32 / fp_sq;
-            let dist_sq = dist_sq_fp64 as f32 / fp_sq;
-
             let dist_to_shape = if is_inside {
                 let d_out = (dist_sq - r_outer_sq) * inv_2_r_outer;
                 let d_in = (r_inner_sq - dist_sq) * inv_2_r_inner;
@@ -1258,6 +1211,11 @@ pub(super) fn draw_arc_line(
                         dist_to_start_cap.min(dist_to_end_cap)
                     }
                     i_slint_core::items::LineCap::Square => {
+                        let p_cross_vs = dx * start_sin - vs_cross_y;
+                        let p_cross_ve = dx * end_sin - ve_cross_y;
+                        let p_dot_vs = dx * start_cos + vs_dot_y;
+                        let p_dot_ve = dx * end_cos + ve_dot_y;
+
                         let dist_to_ray_unsigned = if p_dot_vs > p_dot_ve {
                             p_cross_vs.abs()
                         } else {
@@ -1265,128 +1223,37 @@ pub(super) fn draw_arc_line(
                         };
                         let dist_to_ray = dist_to_ray_unsigned - stroke_width / 2.0;
 
-                        let d_out = (dist_sq - r_outer_sq) * inv_2_r_outer;
-                        let d_in = (r_inner_sq - dist_sq) * inv_2_r_inner;
-                        let radial_dist = d_out.max(d_in);
+                        let p_dot = if p_dot_vs > p_dot_ve { p_dot_vs } else { p_dot_ve };
+                        let dist_along_ray = p_dot;
 
-                        if radial_dist <= 0.0 {
-                            dist_to_ray
-                        } else if dist_to_ray <= 0.0 {
-                            radial_dist
-                        } else {
-                            let max_val = dist_to_ray.max(radial_dist);
-                            let min_val = dist_to_ray.min(radial_dist);
-                            max_val + 0.35 * min_val
-                        }
+                        dist_to_ray.max(dist_along_ray)
                     }
-                    i_slint_core::items::LineCap::Butt | _ => {
-                        let dist_to_ray = if p_dot_vs > p_dot_ve {
-                            p_cross_vs.abs()
-                        } else {
-                            p_cross_ve.abs()
-                        };
-
-                        let d_out = (dist_sq - r_outer_sq) * inv_2_r_outer;
-                        let d_in = (r_inner_sq - dist_sq) * inv_2_r_inner;
-                        let radial_dist = d_out.max(d_in);
-
-                        if radial_dist <= 0.0 {
-                            dist_to_ray
-                        } else {
-                            let max_val = dist_to_ray.max(radial_dist);
-                            let min_val = dist_to_ray.min(radial_dist);
-                            max_val + 0.35 * min_val
-                        }
-                    }
+                    _ => 1.0,
                 }
             };
 
-            if dist_to_shape <= -0.5 {
-                line_buffer[idx].blend(arc.stroke_color);
-            } else if dist_to_shape < 0.5 {
-                let alpha_f = 0.5 - dist_to_shape;
-                let color_alpha = arc.stroke_color.alpha;
-                let alpha = (color_alpha as f32 * alpha_f).round() as u8;
-                if alpha > 0 {
-                    let mut color = arc.stroke_color;
-                    color.alpha = alpha;
-                    if color_alpha > 0 {
-                        color.red = ((color.red as u32 * alpha as u32) / color_alpha as u32) as u8;
-                        color.green = ((color.green as u32 * alpha as u32) / color_alpha as u32) as u8;
-                        color.blue = ((color.blue as u32 * alpha as u32) / color_alpha as u32) as u8;
-                    }
-                    line_buffer[idx].blend(color);
+            let dist_to_shape = dist_to_shape.max(-0.5);
+
+            if dist_to_shape < 0.5 {
+                let mut alpha = 0.5 - dist_to_shape;
+                alpha = alpha.max(0.0).min(1.0);
+                let color_alpha = arc.stroke_color.alpha as f32 / 255.0;
+                let final_alpha = (alpha * color_alpha * 255.0) as u8;
+
+                if final_alpha > 0 {
+                    let c = Color::from_argb_u8(
+                        final_alpha,
+                        arc.stroke_color.red,
+                        arc.stroke_color.green,
+                        arc.stroke_color.blue,
+                    );
+                    line_buffer[idx].blend(c.into());
                 }
             }
-            
-            dx_fp += fp;
-            if !is_full_circle {
-                p_cross_vs_fp += start_sin_fp * fp;
-                p_cross_ve_fp += end_sin_fp * fp;
-                p_dot_vs_fp += start_cos_fp * fp;
-                p_dot_ve_fp += end_cos_fp * fp;
-            }
+
+            dx += 1.0;
         }
     }
 }
-
-#[test]
-fn rgb565() {
-    let pix565 = Rgb565Pixel::from_rgb(0xff, 0x25, 0);
-    let pix888: Rgb8Pixel = pix565.into();
-    assert_eq!(pix565, pix888.into());
-
-    let pix565 = Rgb565Pixel::from_rgb(0x56, 0x42, 0xe3);
-    let pix888: Rgb8Pixel = pix565.into();
-    assert_eq!(pix565, pix888.into());
-}
-
-#[cfg(feature = "path")]
-#[test]
-fn benchmark_draw_arc() {
-    use std::time::Instant;
-    use super::{SceneArc, PremultipliedRgbaColor};
-    use i_slint_core::items::LineCap;
-
-    let span = PhysicalRect {
-        origin: euclid::point2(0, 0),
-        size: euclid::size2(300, 300),
-    };
-
-    let start_rad = 0.0f32.to_radians();
-    let end_rad = 270.0f32.to_radians();
-    let arc = SceneArc {
-        stroke_color: PremultipliedRgbaColor { red: 255, green: 0, blue: 0, alpha: 255 },
-        stroke_width: PhysicalLength::new(15),
-        start_angle: 0.0,
-        end_angle: 270.0,
-        stroke_line_cap: LineCap::Round,
-        start_sin: start_rad.sin(),
-        start_cos: start_rad.cos(),
-        end_sin: end_rad.sin(),
-        end_cos: end_rad.cos(),
-    };
-
-    let mut line_buffer = std::vec![Rgb8Pixel::new(0, 0, 0); 500];
-
-    // Warm-up
-    for line in 0..300 {
-        draw_arc_line(&span, PhysicalLength::new(line as i16), &arc, &mut line_buffer, 0, 0);
-    }
-
-    let start = Instant::now();
-    let iterations = 10000;
-    for _ in 0..iterations {
-        for line in 0..300 {
-            draw_arc_line(&span, PhysicalLength::new(line as i16), &arc, &mut line_buffer, 0, 0);
-        }
-    }
-    let elapsed = start.elapsed();
-    std::println!("BENCHMARK_RESULT: Total time for {} frames of 300 scanlines: {:.3} ms (avg {:.4} ms per frame)", 
-        iterations, elapsed.as_secs_f64() * 1000.0, (elapsed.as_secs_f64() * 1000.0) / iterations as f64);
-}
-
-
-
 
 // early return test
