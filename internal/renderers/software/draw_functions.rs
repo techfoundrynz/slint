@@ -986,6 +986,14 @@ pub(super) fn draw_arc_line(
     let r_out_sq = r_out_bound * r_out_bound;
     let r_in_sq = r_in_bound * r_in_bound;
 
+    let r_out_inner = (r_outer - 0.5).max(0.0);
+    let r_in_inner = (r_mid - stroke_width / 2.0 + 0.5).max(0.0);
+    let r_out_inner_sq = r_out_inner * r_out_inner;
+    let r_in_inner_sq = r_in_inner * r_in_inner;
+    
+    let cap_r_out = stroke_width / 2.0 + 0.5;
+    let cap_r_out_sq = cap_r_out * cap_r_out;
+
     let x_center = span.origin.x as f32 + w / 2.0;
     let y_center = span.origin.y as f32 + h / 2.0;
 
@@ -1052,12 +1060,6 @@ pub(super) fn draw_arc_line(
             continue;
         }
 
-        let dist = dist_sq.sqrt();
-        if dist <= 0.0 {
-            dx += 1.0;
-            continue;
-        }
-
         let p_cross_vs = dx * start_sin - vs_cross_y;
         let p_cross_ve = dx * end_sin - ve_cross_y;
 
@@ -1072,12 +1074,29 @@ pub(super) fn draw_arc_line(
         };
 
         let dist_to_shape = if is_inside {
-            (dist - r_mid).abs() - stroke_width / 2.0
+            let is_radially_solid = dist_sq <= r_out_inner_sq && dist_sq >= r_in_inner_sq;
+            if is_radially_solid {
+                -1.0 // Guaranteed coverage = 1.0, bypass sqrt completely
+            } else {
+                (dist_sq.sqrt() - r_mid).abs() - stroke_width / 2.0
+            }
         } else {
             match arc.stroke_line_cap {
                 i_slint_core::items::LineCap::Round => {
-                    let dist_to_start_cap = ((dx - cap_start.0) * (dx - cap_start.0) + dy_minus_cap_start_y_sq).sqrt() - stroke_width / 2.0;
-                    let dist_to_end_cap = ((dx - cap_end.0) * (dx - cap_end.0) + dy_minus_cap_end_y_sq).sqrt() - stroke_width / 2.0;
+                    let dist_sq_start = (dx - cap_start.0) * (dx - cap_start.0) + dy_minus_cap_start_y_sq;
+                    let dist_sq_end = (dx - cap_end.0) * (dx - cap_end.0) + dy_minus_cap_end_y_sq;
+                    
+                    let dist_to_start_cap = if dist_sq_start > cap_r_out_sq {
+                        1.0 // Outside, bypass sqrt
+                    } else {
+                        dist_sq_start.sqrt() - stroke_width / 2.0
+                    };
+                    
+                    let dist_to_end_cap = if dist_sq_end > cap_r_out_sq {
+                        1.0 // Outside, bypass sqrt
+                    } else {
+                        dist_sq_end.sqrt() - stroke_width / 2.0
+                    };
                     dist_to_start_cap.min(dist_to_end_cap)
                 }
                 i_slint_core::items::LineCap::Square => {
@@ -1089,7 +1108,7 @@ pub(super) fn draw_arc_line(
                         p_cross_ve.abs()
                     };
                     let dist_to_ray = dist_to_ray_unsigned - stroke_width / 2.0;
-                    let radial_dist = (dist - r_mid).abs() - stroke_width / 2.0;
+                    let radial_dist = (dist_sq.sqrt() - r_mid).abs() - stroke_width / 2.0;
                     if radial_dist <= 0.0 {
                         dist_to_ray
                     } else if dist_to_ray <= 0.0 {
@@ -1106,7 +1125,7 @@ pub(super) fn draw_arc_line(
                     } else {
                         p_cross_ve.abs()
                     };
-                    let radial_dist = (dist - r_mid).abs() - stroke_width / 2.0;
+                    let radial_dist = (dist_sq.sqrt() - r_mid).abs() - stroke_width / 2.0;
                     if radial_dist <= 0.0 {
                         dist_to_ray
                     } else {
