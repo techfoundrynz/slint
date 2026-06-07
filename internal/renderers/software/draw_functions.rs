@@ -1048,8 +1048,11 @@ pub(super) fn draw_arc_line(
             }
         }
         
-        let arc_min_y = min_y_norm * r_out_bound;
-        let arc_max_y = max_y_norm * r_out_bound;
+        // Expand the skeleton bounding box by the cap size
+        // Square caps can extend up to sqrt(2) * r_cap. 1.5 * r_cap is extremely safe.
+        let expansion = r_cap * 1.5 + 0.5;
+        let arc_min_y = min_y_norm * r_mid - expansion;
+        let arc_max_y = max_y_norm * r_mid + expansion;
         
         if dy < arc_min_y || dy > arc_max_y {
             return;
@@ -1267,18 +1270,22 @@ pub(super) fn draw_arc_line(
                 }
             };
 
-            let alpha_f = (0.5 - dist_to_shape).clamp(0.0, 1.0);
-            let color_alpha = arc.stroke_color.alpha;
-            let alpha = (color_alpha as f32 * alpha_f).round() as u8;
-            if alpha > 0 {
-                let mut color = arc.stroke_color;
-                color.alpha = alpha;
-                if color_alpha > 0 {
-                    color.red = ((color.red as u32 * alpha as u32) / color_alpha as u32) as u8;
-                    color.green = ((color.green as u32 * alpha as u32) / color_alpha as u32) as u8;
-                    color.blue = ((color.blue as u32 * alpha as u32) / color_alpha as u32) as u8;
+            if dist_to_shape <= -0.5 {
+                line_buffer[idx].blend(arc.stroke_color);
+            } else if dist_to_shape < 0.5 {
+                let alpha_f = 0.5 - dist_to_shape;
+                let color_alpha = arc.stroke_color.alpha;
+                let alpha = (color_alpha as f32 * alpha_f).round() as u8;
+                if alpha > 0 {
+                    let mut color = arc.stroke_color;
+                    color.alpha = alpha;
+                    if color_alpha > 0 {
+                        color.red = ((color.red as u32 * alpha as u32) / color_alpha as u32) as u8;
+                        color.green = ((color.green as u32 * alpha as u32) / color_alpha as u32) as u8;
+                        color.blue = ((color.blue as u32 * alpha as u32) / color_alpha as u32) as u8;
+                    }
+                    line_buffer[idx].blend(color);
                 }
-                line_buffer[idx].blend(color);
             }
             
             dx_fp += fp;
@@ -1315,12 +1322,18 @@ fn benchmark_draw_arc() {
         size: euclid::size2(300, 300),
     };
 
+    let start_rad = 0.0f32.to_radians();
+    let end_rad = 270.0f32.to_radians();
     let arc = SceneArc {
         stroke_color: PremultipliedRgbaColor { red: 255, green: 0, blue: 0, alpha: 255 },
         stroke_width: PhysicalLength::new(15),
         start_angle: 0.0,
         end_angle: 270.0,
         stroke_line_cap: LineCap::Round,
+        start_sin: start_rad.sin(),
+        start_cos: start_rad.cos(),
+        end_sin: end_rad.sin(),
+        end_cos: end_rad.cos(),
     };
 
     let mut line_buffer = std::vec![Rgb8Pixel::new(0, 0, 0); 500];
