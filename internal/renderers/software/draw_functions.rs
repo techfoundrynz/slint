@@ -1016,9 +1016,24 @@ pub(super) fn draw_arc_line(
     let cap_start = (r_mid * start_cos, r_mid * start_sin);
     let cap_end = (r_mid * end_cos, r_mid * end_sin);
 
+    // Loop invariants for the current scanline (avoiding redundant math in pixel loop)
+    let dy_sq = dy * dy;
+    let dx_max_sq = r_out_sq - dy_sq;
+    if dx_max_sq <= 0.0 {
+        return;
+    }
+    let dx_max = dx_max_sq.sqrt();
+
+    let vs_cross_y = dy * start_cos;
+    let ve_cross_y = dy * end_cos;
+    let vs_dot_y = dy * start_sin;
+    let ve_dot_y = dy * end_sin;
+    let dy_minus_cap_start_y_sq = (dy - cap_start.1) * (dy - cap_start.1);
+    let dy_minus_cap_end_y_sq = (dy - cap_end.1) * (dy - cap_end.1);
+
     let line_start_x = span.origin.x + extra_left_clip;
-    let x_start_phys = (x_center - r_out_bound).floor() as i16;
-    let x_end_phys = (x_center + r_out_bound).ceil() as i16;
+    let x_start_phys = (x_center - dx_max).floor() as i16;
+    let x_end_phys = (x_center + dx_max).ceil() as i16;
 
     let start_idx = (x_start_phys - line_start_x).max(0) as usize;
     let end_idx = (x_end_phys - line_start_x).min(line_buffer.len() as i16).max(0) as usize;
@@ -1027,32 +1042,32 @@ pub(super) fn draw_arc_line(
         return;
     }
 
+    let mut dx = (line_start_x + start_idx as i16) as f32 + 0.5 - x_center;
     for idx in start_idx..end_idx {
-        let x_phys = line_start_x + idx as i16;
-        let dx = (x_phys as f32 + 0.5) - x_center;
-        let dist_sq = dx * dx + dy * dy;
+        let dist_sq = dx * dx + dy_sq;
 
         // Fast-path bounding check: skip heavy math/sqrt if pixel is entirely outside the arc ring
         if dist_sq > r_out_sq || dist_sq < r_in_sq {
+            dx += 1.0;
             continue;
         }
 
         let dist = dist_sq.sqrt();
         if dist <= 0.0 {
+            dx += 1.0;
             continue;
         }
+
+        let p_cross_vs = dx * start_sin - vs_cross_y;
+        let p_cross_ve = dx * end_sin - ve_cross_y;
 
         let is_inside = if is_full_circle {
             true
         } else {
-            let vs_cross_p = start_cos * dy - start_sin * dx;
-            let p_cross_ve = dx * end_sin - dy * end_cos;
             if sweep < 180.0 {
-                vs_cross_p >= 0.0 && p_cross_ve >= 0.0
+                p_cross_vs <= 0.0 && p_cross_ve >= 0.0
             } else {
-                let ve_cross_p = end_cos * dy - end_sin * dx;
-                let p_cross_vs = dx * start_sin - dy * start_cos;
-                !(ve_cross_p >= 0.0 && p_cross_vs >= 0.0)
+                !(p_cross_ve <= 0.0 && p_cross_vs >= 0.0)
             }
         };
 
@@ -1061,17 +1076,17 @@ pub(super) fn draw_arc_line(
         } else {
             match arc.stroke_line_cap {
                 i_slint_core::items::LineCap::Round => {
-                    let dist_to_start_cap = ((dx - cap_start.0).powi(2) + (dy - cap_start.1).powi(2)).sqrt() - stroke_width / 2.0;
-                    let dist_to_end_cap = ((dx - cap_end.0).powi(2) + (dy - cap_end.1).powi(2)).sqrt() - stroke_width / 2.0;
+                    let dist_to_start_cap = ((dx - cap_start.0) * (dx - cap_start.0) + dy_minus_cap_start_y_sq).sqrt() - stroke_width / 2.0;
+                    let dist_to_end_cap = ((dx - cap_end.0) * (dx - cap_end.0) + dy_minus_cap_end_y_sq).sqrt() - stroke_width / 2.0;
                     dist_to_start_cap.min(dist_to_end_cap)
                 }
                 i_slint_core::items::LineCap::Square => {
-                    let dist_to_ray_unsigned = if dx * start_cos + dy * start_sin > dx * end_cos + dy * end_sin {
-                        // Closer to start cap
-                        (dx * start_sin - dy * start_cos).abs()
+                    let p_dot_vs = dx * start_cos + vs_dot_y;
+                    let p_dot_ve = dx * end_cos + ve_dot_y;
+                    let dist_to_ray_unsigned = if p_dot_vs > p_dot_ve {
+                        p_cross_vs.abs()
                     } else {
-                        // Closer to end cap
-                        (dx * end_sin - dy * end_cos).abs()
+                        p_cross_ve.abs()
                     };
                     let dist_to_ray = dist_to_ray_unsigned - stroke_width / 2.0;
                     let radial_dist = (dist - r_mid).abs() - stroke_width / 2.0;
@@ -1084,12 +1099,12 @@ pub(super) fn draw_arc_line(
                     }
                 }
                 i_slint_core::items::LineCap::Butt | _ => {
-                    let dist_to_ray = if dx * start_cos + dy * start_sin > dx * end_cos + dy * end_sin {
-                        // Closer to start cap
-                        (dx * start_sin - dy * start_cos).abs()
+                    let p_dot_vs = dx * start_cos + vs_dot_y;
+                    let p_dot_ve = dx * end_cos + ve_dot_y;
+                    let dist_to_ray = if p_dot_vs > p_dot_ve {
+                        p_cross_vs.abs()
                     } else {
-                        // Closer to end cap
-                        (dx * end_sin - dy * end_cos).abs()
+                        p_cross_ve.abs()
                     };
                     let radial_dist = (dist - r_mid).abs() - stroke_width / 2.0;
                     if radial_dist <= 0.0 {
@@ -1113,6 +1128,8 @@ pub(super) fn draw_arc_line(
             };
             line_buffer[idx].blend(col);
         }
+
+        dx += 1.0;
     }
 }
 
