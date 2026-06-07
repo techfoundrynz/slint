@@ -1134,6 +1134,7 @@ pub(super) fn draw_arc_line(
     let dy_sq_fp64 = (dy_fp as i64) * (dy_fp as i64);
     
     let r_out_sq_fp64 = (r_out_sq * fp_sq) as i64;
+    let r_in_sq_fp64 = (r_in_sq * fp_sq) as i64;
     let r_out_solid_sq_fp64 = (((r_outer - 0.5) * (r_outer - 0.5)) * fp_sq) as i64;
     let r_in_solid_sq_fp64 = (((r_inner + 0.5) * (r_inner + 0.5)) * fp_sq) as i64;
 
