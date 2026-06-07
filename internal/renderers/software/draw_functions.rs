@@ -1155,7 +1155,7 @@ pub(super) fn draw_arc_line(
             let dist_sq_fp64 = (dx_fp as i64) * (dx_fp as i64) + dy_sq_fp64;
 
             // Fast-path bounding check for outer bounds (integer math!)
-            if dist_sq_fp64 > r_out_sq_fp64 {
+            if dist_sq_fp64 > r_out_sq_fp64 || dist_sq_fp64 < r_in_sq_fp64 {
                 dx_fp += fp;
                 if !is_full_circle {
                     p_cross_vs_fp += start_sin_fp * fp;
