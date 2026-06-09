@@ -578,5 +578,6 @@ pub struct SceneArc {
     pub start_cos: f32,
     pub end_sin: f32,
     pub end_cos: f32,
+    pub params: super::draw_functions::ArcParameters,
 }
 

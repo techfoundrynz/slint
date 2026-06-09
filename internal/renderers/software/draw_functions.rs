@@ -960,141 +960,236 @@ impl From<Rgb565Pixel> for Rgb8Pixel {
 }
 
 #[cfg(feature = "path")]
+#[derive(Debug)]
+pub struct ArcParameters {
+    pub stroke_width: f32,
+    pub r_mid: f32,
+    pub r_outer: f32,
+    pub r_out_bound: f32,
+    pub r_in_bound: f32,
+    pub r_out_sq: f32,
+    pub r_in_sq: f32,
+    pub r_outer_sq: f32,
+    pub inv_2_r_outer: f32,
+    pub r_inner: f32,
+    pub r_inner_sq: f32,
+    pub inv_2_r_inner: f32,
+    pub r_cap: f32,
+    pub r_cap_sq: f32,
+    pub inv_2_r_cap: f32,
+    pub cap_r_in: f32,
+    pub cap_r_in_sq: f32,
+    pub cap_r_out: f32,
+    pub cap_r_out_sq: f32,
+    pub x_center: f32,
+    pub y_center: f32,
+    pub start_angle: f32,
+    pub end_angle: f32,
+    pub start_cos: f32,
+    pub start_sin: f32,
+    pub end_cos: f32,
+    pub end_sin: f32,
+    pub sweep: f32,
+    pub is_full_circle: bool,
+    pub is_sweep_less_180: bool,
+    pub arc_min_y: f32,
+    pub arc_max_y: f32,
+    pub cap_start_x: f32,
+    pub cap_start_y: f32,
+    pub cap_end_x: f32,
+    pub cap_end_y: f32,
+    pub r_out_solid_sq: f32,
+    pub r_in_solid_sq: f32,
+    pub cap_expansion: f32,
+}
+
+#[cfg(feature = "path")]
+impl ArcParameters {
+    pub fn new(
+        span: &PhysicalRect,
+        stroke_width: f32,
+        start_angle_rad: f32,
+        end_angle_rad: f32,
+        mut start_cos: f32,
+        mut start_sin: f32,
+        mut end_cos: f32,
+        mut end_sin: f32,
+    ) -> Self {
+        let w = span.size.width as f32;
+        let h = span.size.height as f32;
+        let r_mid = (w.min(h) - stroke_width).max(0.0) / 2.0;
+        let r_outer = r_mid + stroke_width / 2.0;
+
+        let r_out_bound = r_outer + 0.5;
+        let r_in_bound = (r_mid - stroke_width / 2.0 - 0.5).max(0.0);
+        let r_out_sq = r_out_bound * r_out_bound;
+        let r_in_sq = r_in_bound * r_in_bound;
+
+        let r_outer_sq = r_outer * r_outer;
+        let inv_2_r_outer = 1.0 / (2.0 * r_outer);
+
+        let r_inner = (r_mid - stroke_width / 2.0).max(0.0);
+        let (r_inner_sq, inv_2_r_inner) = if r_inner > 0.0 {
+            (r_inner * r_inner, 1.0 / (2.0 * r_inner))
+        } else {
+            (-999999.0, 1.0)
+        };
+
+        let r_cap = stroke_width / 2.0;
+        let r_cap_sq = r_cap * r_cap;
+        let inv_2_r_cap = 1.0 / (2.0 * r_cap);
+        let cap_r_in = (r_cap - 0.5).max(0.0);
+        let cap_r_in_sq = cap_r_in * cap_r_in;
+        let cap_r_out = r_cap + 0.5;
+        let cap_r_out_sq = cap_r_out * cap_r_out;
+
+        let x_center = span.origin.x as f32 + w / 2.0;
+        let y_center = span.origin.y as f32 + h / 2.0;
+
+        // Normalize start/end angles so that sweep is positive
+        let mut start_angle = start_angle_rad.to_degrees();
+        let mut end_angle = end_angle_rad.to_degrees();
+        if end_angle < start_angle {
+            core::mem::swap(&mut start_angle, &mut end_angle);
+            core::mem::swap(&mut start_cos, &mut end_cos);
+            core::mem::swap(&mut start_sin, &mut end_sin);
+        }
+        let sweep = end_angle - start_angle;
+        let is_full_circle = sweep >= 360.0;
+        let is_sweep_less_180 = sweep < 180.0;
+
+        let mut min_y_norm = start_sin.min(end_sin);
+        let mut max_y_norm = start_sin.max(end_sin);
+        if !is_full_circle {
+            let start_quad = (start_angle / 90.0).floor() as i32;
+            let end_quad = (end_angle / 90.0).floor() as i32;
+            for q in start_quad..=end_quad {
+                let angle = (q * 90) % 360;
+                if angle == 90 || angle == -270 {
+                    max_y_norm = 1.0;
+                } else if angle == 270 || angle == -90 {
+                    min_y_norm = -1.0;
+                }
+            }
+        }
+        let expansion = r_cap * 1.5 + 0.5;
+        let arc_min_y = min_y_norm * r_mid - expansion;
+        let arc_max_y = max_y_norm * r_mid + expansion;
+
+        let cap_start_x = r_mid * start_cos;
+        let cap_start_y = r_mid * start_sin;
+        let cap_end_x = r_mid * end_cos;
+        let cap_end_y = r_mid * end_sin;
+
+        let r_out_solid_sq = (r_outer - 0.5) * (r_outer - 0.5);
+        let r_in_solid_sq = (r_inner + 0.5) * (r_inner + 0.5);
+        let cap_expansion = r_cap * 1.5 + 0.5;
+
+        Self {
+            stroke_width,
+            r_mid,
+            r_outer,
+            r_out_bound,
+            r_in_bound,
+            r_out_sq,
+            r_in_sq,
+            r_outer_sq,
+            inv_2_r_outer,
+            r_inner,
+            r_inner_sq,
+            inv_2_r_inner,
+            r_cap,
+            r_cap_sq,
+            inv_2_r_cap,
+            cap_r_in,
+            cap_r_in_sq,
+            cap_r_out,
+            cap_r_out_sq,
+            x_center,
+            y_center,
+            start_angle,
+            end_angle,
+            start_cos,
+            start_sin,
+            end_cos,
+            end_sin,
+            sweep,
+            is_full_circle,
+            is_sweep_less_180,
+            arc_min_y,
+            arc_max_y,
+            cap_start_x,
+            cap_start_y,
+            cap_end_x,
+            cap_end_y,
+            r_out_solid_sq,
+            r_in_solid_sq,
+            cap_expansion,
+        }
+    }
+}
+
+
+#[cfg(feature = "path")]
 pub(super) fn draw_arc_line<Pixel: TargetPixel>(
     span: &PhysicalRect,
     line: PhysicalLength,
     arc: &super::SceneArc,
+    params: &ArcParameters,
     line_buffer: &mut [Pixel],
     extra_left_clip: i16,
     _extra_right_clip: i16,
 ) {
-    let stroke_width = arc.stroke_width.get() as f32;
-    if stroke_width <= 0.0 {
+    if params.stroke_width <= 0.0 {
         return;
     }
 
     let is_opaque = arc.stroke_color.alpha == u8::MAX;
     let solid_color_pixel = Pixel::from_rgb(arc.stroke_color.red, arc.stroke_color.green, arc.stroke_color.blue);
 
-    let w = span.size.width as f32;
-    let h = span.size.height as f32;
-    let r_mid = (w.min(h) - stroke_width).max(0.0) / 2.0;
-    let r_outer = r_mid + stroke_width / 2.0;
-    if r_outer <= 0.0 {
+    let dy = (line.get() as f32 + 0.5) - params.y_center;
+    if dy.abs() >= params.r_out_bound {
         return;
     }
 
-    let r_out_bound = r_outer + 0.5;
-    let r_in_bound = (r_mid - stroke_width / 2.0 - 0.5).max(0.0);
-    let r_out_sq = r_out_bound * r_out_bound;
-    let r_in_sq = r_in_bound * r_in_bound;
-
-    // Taylor Series constants
-    let r_outer_sq = r_outer * r_outer;
-    let inv_2_r_outer = 1.0 / (2.0 * r_outer);
-
-    let r_inner = (r_mid - stroke_width / 2.0).max(0.0);
-    let (r_inner_sq, inv_2_r_inner) = if r_inner > 0.0 {
-        (r_inner * r_inner, 1.0 / (2.0 * r_inner))
-    } else {
-        (-999999.0, 1.0)
-    };
-
-    let r_cap = stroke_width / 2.0;
-    let r_cap_sq = r_cap * r_cap;
-    let inv_2_r_cap = 1.0 / (2.0 * r_cap);
-    let cap_r_in = (r_cap - 0.5).max(0.0);
-    let cap_r_in_sq = cap_r_in * cap_r_in;
-    let cap_r_out = r_cap + 0.5;
-    let cap_r_out_sq = cap_r_out * cap_r_out;
-
-    let x_center = span.origin.x as f32 + w / 2.0;
-    let y_center = span.origin.y as f32 + h / 2.0;
-
-    let dy = (line.get() as f32 + 0.5) - y_center;
-    if dy.abs() >= r_out_bound {
+    if params.sweep <= 0.0 {
         return;
     }
 
-    // Normalize start/end angles so that sweep is positive
-    let mut start_angle = arc.start_angle.to_degrees();
-    let mut end_angle = arc.end_angle.to_degrees();
-    let mut start_cos = arc.start_cos;
-    let mut start_sin = arc.start_sin;
-    let mut end_cos = arc.end_cos;
-    let mut end_sin = arc.end_sin;
-    if end_angle < start_angle {
-        core::mem::swap(&mut start_angle, &mut end_angle);
-        core::mem::swap(&mut start_cos, &mut end_cos);
-        core::mem::swap(&mut start_sin, &mut end_sin);
-    }
-    let sweep = end_angle - start_angle;
-    if sweep <= 0.0 {
-        return;
-    }
-    let is_full_circle = sweep >= 360.0;
-    let is_sweep_less_180 = sweep < 180.0;
-
-    if !is_full_circle {
-        let mut min_y_norm = start_sin.min(end_sin);
-        let mut max_y_norm = start_sin.max(end_sin);
-        
-        let start_quad = (start_angle / 90.0).floor() as i32;
-        let end_quad = (end_angle / 90.0).floor() as i32;
-        
-        for q in start_quad..=end_quad {
-            let angle = (q * 90) % 360;
-            if angle == 90 || angle == -270 {
-                max_y_norm = 1.0;
-            } else if angle == 270 || angle == -90 {
-                min_y_norm = -1.0;
-            }
-        }
-        
-        // Expand the skeleton bounding box by the cap size
-        let expansion = r_cap * 1.5 + 0.5;
-        let arc_min_y = min_y_norm * r_mid - expansion;
-        let arc_max_y = max_y_norm * r_mid + expansion;
-        
-        if dy < arc_min_y || dy > arc_max_y {
+    if !params.is_full_circle {
+        if dy < params.arc_min_y || dy > params.arc_max_y {
             return;
         }
     }
 
-    // Precompute cap centers and unit vectors if needed
-    let cap_start_x = r_mid * start_cos;
-    let cap_start_y = r_mid * start_sin;
-    let cap_end_x = r_mid * end_cos;
-    let cap_end_y = r_mid * end_sin;
+    let vs_cross_y = dy * params.start_cos;
+    let ve_cross_y = dy * params.end_cos;
+    let vs_dot_y = dy * params.start_sin;
+    let ve_dot_y = dy * params.end_sin;
 
-    let vs_cross_y = dy * start_cos;
-    let ve_cross_y = dy * end_cos;
-    let vs_dot_y = dy * start_sin;
-    let ve_dot_y = dy * end_sin;
-
-    let dy_minus_cap_start_y_sq = (dy - cap_start_y) * (dy - cap_start_y);
-    let dy_minus_cap_end_y_sq = (dy - cap_end_y) * (dy - cap_end_y);
+    let dy_minus_cap_start_y_sq = (dy - params.cap_start_y) * (dy - params.cap_start_y);
+    let dy_minus_cap_end_y_sq = (dy - params.cap_end_y) * (dy - params.cap_end_y);
 
     let line_start_x = span.origin.x + extra_left_clip;
     
     let dy_sq = dy * dy;
-    let dx_max_sq = r_out_sq - dy_sq;
+    let dx_max_sq = params.r_out_sq - dy_sq;
     if dx_max_sq < 0.0 { return; }
     let dx_max = dx_max_sq.sqrt();
     
-    let x_start_phys = (x_center - dx_max).floor() as i16;
-    let x_end_phys = (x_center + dx_max).ceil() as i16;
+    let x_start_phys = (params.x_center - dx_max).floor() as i16;
+    let x_end_phys = (params.x_center + dx_max).ceil() as i16;
 
     let start_idx = (x_start_phys - line_start_x).max(0) as usize;
     let end_idx = (x_end_phys - line_start_x).min(line_buffer.len() as i16).max(0) as usize;
 
     let mut ranges = [(0usize, 0usize); 2];
     let mut num_ranges = 0;
-    let dx_in_sq = r_in_sq - dy_sq;
+    let dx_in_sq = params.r_in_sq - dy_sq;
     if dx_in_sq > 0.0 {
         let dx_in = dx_in_sq.sqrt();
-        let skip_x_start = (x_center - 0.5 - dx_in).floor() as i16 + 1;
-        let skip_x_end = (x_center - 0.5 + dx_in).ceil() as i16 - 1;
+        let skip_x_start = (params.x_center - 0.5 - dx_in).floor() as i16 + 1;
+        let skip_x_end = (params.x_center - 0.5 + dx_in).ceil() as i16 - 1;
 
         if skip_x_start <= skip_x_end {
             let idx_skip_start = (skip_x_start - line_start_x).max(0) as usize;
@@ -1127,24 +1222,20 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
         }
     }
 
-    let r_out_solid_sq = (r_outer - 0.5) * (r_outer - 0.5);
-    let r_in_solid_sq = (r_inner + 0.5) * (r_inner + 0.5);
-    let cap_expansion = r_cap * 1.5 + 0.5;
-
     for i in 0..num_ranges {
         let (r_start, r_end) = ranges[i];
         
-        let mut dx = (line_start_x + r_start as i16) as f32 + 0.5 - x_center;
+        let mut dx = (line_start_x + r_start as i16) as f32 + 0.5 - params.x_center;
+        let mut p_cross_vs = dx * params.start_sin - vs_cross_y;
+        let mut p_cross_ve = dx * params.end_sin - ve_cross_y;
 
         for idx in r_start..r_end {
             let dist_sq = dx * dx + dy_sq;
 
-            let is_inside = if is_full_circle {
+            let is_inside = if params.is_full_circle {
                 true
             } else {
-                let p_cross_vs = dx * start_sin - vs_cross_y;
-                let p_cross_ve = dx * end_sin - ve_cross_y;
-                if is_sweep_less_180 {
+                if params.is_sweep_less_180 {
                     p_cross_vs <= 0.0 && p_cross_ve >= 0.0
                 } else {
                     !(p_cross_ve <= 0.0 && p_cross_vs >= 0.0)
@@ -1153,24 +1244,26 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
 
             // Fast-path skip for empty pixels not near caps
             if !is_inside {
-                let dx_diff_start = (dx - cap_start_x).abs();
-                let dy_diff_start = (dy - cap_start_y).abs();
-                let mut near_cap = dx_diff_start <= cap_expansion && dy_diff_start <= cap_expansion;
+                let dx_diff_start = (dx - params.cap_start_x).abs();
+                let dy_diff_start = (dy - params.cap_start_y).abs();
+                let mut near_cap = dx_diff_start <= params.cap_expansion && dy_diff_start <= params.cap_expansion;
                 
                 if !near_cap {
-                    let dx_diff_end = (dx - cap_end_x).abs();
-                    let dy_diff_end = (dy - cap_end_y).abs();
-                    near_cap = dx_diff_end <= cap_expansion && dy_diff_end <= cap_expansion;
+                    let dx_diff_end = (dx - params.cap_end_x).abs();
+                    let dy_diff_end = (dy - params.cap_end_y).abs();
+                    near_cap = dx_diff_end <= params.cap_expansion && dy_diff_end <= params.cap_expansion;
                 }
                 
                 if !near_cap {
                     dx += 1.0;
+                    p_cross_vs += params.start_sin;
+                    p_cross_ve += params.end_sin;
                     continue;
                 }
             }
 
             // Fast-path for completely solid pixels (alpha = 1.0)
-            let is_solid = is_inside && dist_sq <= r_out_solid_sq && dist_sq >= r_in_solid_sq;
+            let is_solid = is_inside && dist_sq <= params.r_out_solid_sq && dist_sq >= params.r_in_solid_sq;
             if is_solid {
                 if is_opaque {
                     line_buffer[idx] = solid_color_pixel;
@@ -1179,49 +1272,51 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
                 }
                 
                 dx += 1.0;
+                p_cross_vs += params.start_sin;
+                p_cross_ve += params.end_sin;
                 continue;
             }
             
             // Fallback to f32 for anti-aliased edge and cap pixels
             let dist_to_shape = if is_inside {
-                let d_out = (dist_sq - r_outer_sq) * inv_2_r_outer;
-                let d_in = (r_inner_sq - dist_sq) * inv_2_r_inner;
+                let d_out = (dist_sq - params.r_outer_sq) * params.inv_2_r_outer;
+                let d_in = (params.r_inner_sq - dist_sq) * params.inv_2_r_inner;
                 d_out.max(d_in)
             } else {
                 match arc.stroke_line_cap {
                     i_slint_core::items::LineCap::Round => {
-                        let dist_sq_start = (dx - cap_start_x) * (dx - cap_start_x) + dy_minus_cap_start_y_sq;
-                        let dist_sq_end = (dx - cap_end_x) * (dx - cap_end_x) + dy_minus_cap_end_y_sq;
+                        let dist_sq_start = (dx - params.cap_start_x) * (dx - params.cap_start_x) + dy_minus_cap_start_y_sq;
+                        let dist_sq_end = (dx - params.cap_end_x) * (dx - params.cap_end_x) + dy_minus_cap_end_y_sq;
                         
-                        let dist_to_start_cap = if dist_sq_start > cap_r_out_sq {
+                        let dist_to_start_cap = if dist_sq_start > params.cap_r_out_sq {
                             1.0
-                        } else if dist_sq_start <= cap_r_in_sq {
+                        } else if dist_sq_start <= params.cap_r_in_sq {
                             -1.0
                         } else {
-                            (dist_sq_start - r_cap_sq) * inv_2_r_cap
+                            (dist_sq_start - params.r_cap_sq) * params.inv_2_r_cap
                         };
                         
-                        let dist_to_end_cap = if dist_sq_end > cap_r_out_sq {
+                        let dist_to_end_cap = if dist_sq_end > params.cap_r_out_sq {
                             1.0
-                        } else if dist_sq_end <= cap_r_in_sq {
+                        } else if dist_sq_end <= params.cap_r_in_sq {
                             -1.0
                         } else {
-                            (dist_sq_end - r_cap_sq) * inv_2_r_cap
+                            (dist_sq_end - params.r_cap_sq) * params.inv_2_r_cap
                         };
                         dist_to_start_cap.min(dist_to_end_cap)
                     }
                     i_slint_core::items::LineCap::Square => {
-                        let p_cross_vs = dx * start_sin - vs_cross_y;
-                        let p_cross_ve = dx * end_sin - ve_cross_y;
-                        let p_dot_vs = dx * start_cos + vs_dot_y;
-                        let p_dot_ve = dx * end_cos + ve_dot_y;
+                        let p_cross_vs = dx * params.start_sin - vs_cross_y;
+                        let p_cross_ve = dx * params.end_sin - ve_cross_y;
+                        let p_dot_vs = dx * params.start_cos + vs_dot_y;
+                        let p_dot_ve = dx * params.end_cos + ve_dot_y;
 
                         let dist_to_ray_unsigned = if p_dot_vs > p_dot_ve {
                             p_cross_vs.abs()
                         } else {
                             p_cross_ve.abs()
                         };
-                        let dist_to_ray = dist_to_ray_unsigned - stroke_width / 2.0;
+                        let dist_to_ray = dist_to_ray_unsigned - params.stroke_width / 2.0;
 
                         let p_dot = if p_dot_vs > p_dot_ve { p_dot_vs } else { p_dot_ve };
                         let dist_along_ray = p_dot;
@@ -1252,8 +1347,11 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
             }
 
             dx += 1.0;
+            p_cross_vs += params.start_sin;
+            p_cross_ve += params.end_sin;
         }
     }
 }
+
 
 // early return test

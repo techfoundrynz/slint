@@ -14,7 +14,7 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
-mod draw_functions;
+pub(crate) mod draw_functions;
 mod fixed;
 mod fonts;
 mod minimal_software_window;
@@ -1404,6 +1404,7 @@ fn render_window_frame_by_line(
                                     &PhysicalRect { origin: span.pos, size: span.size },
                                     scene.current_line,
                                     arc,
+                                    &arc.params,
                                     range_buffer,
                                     extra_left_clip,
                                     extra_right_clip,
@@ -1996,6 +1997,7 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
                 &geometry,
                 PhysicalLength::new(line),
                 &arc,
+                &arc.params,
                 buffer,
                 extra_left_clip,
                 extra_right_clip,
@@ -3175,6 +3177,21 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         let end_angle = arc.end_angle();
         let start_rad = start_angle.to_radians();
         let end_rad = end_angle.to_radians();
+        let start_sin = start_rad.sin();
+        let start_cos = start_rad.cos();
+        let end_sin = end_rad.sin();
+        let end_cos = end_rad.cos();
+
+        let params = draw_functions::ArcParameters::new(
+            &physical_geom,
+            physical_stroke_width.get() as f32,
+            start_rad,
+            end_rad,
+            start_cos,
+            start_sin,
+            end_cos,
+            end_sin,
+        );
 
         let scene_arc = SceneArc {
             stroke_color: stroke_color.into(),
@@ -3182,10 +3199,11 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
             start_angle: start_rad,
             end_angle: end_rad,
             stroke_line_cap: arc.stroke_line_cap(),
-            start_sin: start_rad.sin(),
-            start_cos: start_rad.cos(),
-            end_sin: end_rad.sin(),
-            end_cos: end_rad.cos(),
+            start_sin,
+            start_cos,
+            end_sin,
+            end_cos,
+            params,
         };
 
         self.processor.process_arc(physical_geom, scene_arc);
