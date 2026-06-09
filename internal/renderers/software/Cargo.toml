@@ -34,6 +34,7 @@ experimental = []
 # Exposes additional APIS that aren't public but required for integration testing.
 testing = ["i-slint-core/testing"]
 default = ["std"]
+disable-aa = []
 
 [dependencies]
 i-slint-core = { workspace = true }

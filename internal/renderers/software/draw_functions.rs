@@ -272,13 +272,20 @@ pub(super) fn draw_texture_line(
             TexturePixelFormat::AlphaMap => {
                 for pix in line_buffer {
                     let pos = pos(1).0;
-                    let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
-                        ((data[pos] as u16 * alpha as u16) / 255) as u8,
-                        color.red(),
-                        color.green(),
-                        color.blue(),
-                    ));
-                    pix.blend(c);
+                    #[cfg(feature = "disable-aa")]
+                    let text_alpha = if data[pos] < 128 { 0 } else { alpha };
+                    #[cfg(not(feature = "disable-aa"))]
+                    let text_alpha = ((data[pos] as u16 * alpha as u16) / 255) as u8;
+
+                    if text_alpha > 0 {
+                        let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
+                            text_alpha,
+                            color.red(),
+                            color.green(),
+                            color.blue(),
+                        ));
+                        pix.blend(c);
+                    }
                 }
             }
             TexturePixelFormat::SignedDistanceField => {
@@ -366,6 +373,15 @@ pub(super) fn draw_rounded_rectangle_line(
     let border = Shifted::new(rr.width.get());
     const ONE: Shifted = Shifted::ONE;
     const ZERO: Shifted = Shifted(0);
+    #[cfg(feature = "disable-aa")]
+    let anti_alias = |x1: Shifted, x2: Shifted, process_pixel: &mut dyn FnMut(usize, u32)| {
+        let mid = (x1.0 + x2.0) >> 1;
+        for x in x1.floor()..x2.ceil() {
+            let cov = if (x << 4) < mid { 0 } else { 255 };
+            process_pixel(x as usize, cov);
+        }
+    };
+    #[cfg(not(feature = "disable-aa"))]
     let anti_alias = |x1: Shifted, x2: Shifted, process_pixel: &mut dyn FnMut(usize, u32)| {
         // x1 and x2 are the coordinate on the top and bottom of the intersection of the pixel
         // line and the curve.
@@ -527,6 +543,12 @@ fn interpolate_color(
     color1: PremultipliedRgbaColor,
     color2: PremultipliedRgbaColor,
 ) -> PremultipliedRgbaColor {
+    if a == 0 {
+        return color1;
+    }
+    if a == 255 {
+        return color2;
+    }
     let b = 255 - a;
 
     let al1 = color1.alpha as u32;
