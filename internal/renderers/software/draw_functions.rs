@@ -1001,6 +1001,8 @@ pub struct ArcParameters {
     pub r_out_solid_sq: f32,
     pub r_in_solid_sq: f32,
     pub cap_expansion: f32,
+    pub inv_start_sin: f32,
+    pub inv_end_sin: f32,
 }
 
 #[cfg(feature = "path")]
@@ -1085,6 +1087,9 @@ impl ArcParameters {
         let r_in_solid_sq = (r_inner + 0.5) * (r_inner + 0.5);
         let cap_expansion = r_cap * 1.5 + 0.5;
 
+        let inv_start_sin = if start_sin.abs() > 1e-5 { 1.0 / start_sin } else { 0.0 };
+        let inv_end_sin = if end_sin.abs() > 1e-5 { 1.0 / end_sin } else { 0.0 };
+
         Self {
             stroke_width,
             r_mid,
@@ -1125,6 +1130,8 @@ impl ArcParameters {
             r_out_solid_sq,
             r_in_solid_sq,
             cap_expansion,
+            inv_start_sin,
+            inv_end_sin,
         }
     }
 }
@@ -1167,15 +1174,27 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
     let vs_dot_y = dy * params.start_sin;
     let ve_dot_y = dy * params.end_sin;
 
-    let dy_minus_cap_start_y_sq = (dy - params.cap_start_y) * (dy - params.cap_start_y);
-    let dy_minus_cap_end_y_sq = (dy - params.cap_end_y) * (dy - params.cap_end_y);
+
 
     let line_start_x = span.origin.x + extra_left_clip;
     
     let dy_sq = dy * dy;
+
+    const DISABLE_AA: bool = true;
+    let r_out_solid_sq = if DISABLE_AA { params.r_out_sq } else { params.r_out_solid_sq };
+    let r_in_solid_sq = if DISABLE_AA { params.r_in_sq } else { params.r_in_solid_sq };
+
+    let dy_minus_cap_start_y_sq = (dy - params.cap_start_y) * (dy - params.cap_start_y);
+    let dy_minus_cap_end_y_sq = (dy - params.cap_end_y) * (dy - params.cap_end_y);
+
+    let dy_diff_start = (dy - params.cap_start_y).abs();
+    let dy_diff_end = (dy - params.cap_end_y).abs();
+    let is_near_cap_start_y = dy_diff_start <= params.cap_expansion;
+    let is_near_cap_end_y = dy_diff_end <= params.cap_expansion;
+
     let dx_max_sq = params.r_out_sq - dy_sq;
     if dx_max_sq < 0.0 { return; }
-    let dx_max = dx_max_sq.sqrt();
+    let dx_max = dx_max_sq.sqrt() + 1.0;
     
     let x_start_phys = (params.x_center - dx_max).floor() as i16;
     let x_end_phys = (params.x_center + dx_max).ceil() as i16;
@@ -1222,133 +1241,397 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
         }
     }
 
+    // Pre-calculate solid ranges for the scanline
+    let mut solid_ranges = [None; 2];
+    let mut num_solid_ranges = 0;
+    if r_out_solid_sq >= dy_sq {
+        let dx_out_solid_sq = r_out_solid_sq - dy_sq;
+        let dx_out_solid = dx_out_solid_sq.sqrt();
+        let dx_in_solid = if r_in_solid_sq > dy_sq {
+            let dx_in_solid_sq = r_in_solid_sq - dy_sq;
+            dx_in_solid_sq.sqrt() + 1.0
+        } else {
+            0.0
+        };
+        
+        if dx_in_solid > 0.0 {
+            let left_min = (params.x_center - 0.5 - dx_out_solid).ceil() as i16;
+            let left_max = (params.x_center - 0.5 - dx_in_solid).floor() as i16;
+            if left_min <= left_max {
+                solid_ranges[num_solid_ranges] = Some((left_min, left_max));
+                num_solid_ranges += 1;
+            }
+            
+            let right_min = (params.x_center - 0.5 + dx_in_solid).ceil() as i16;
+            let right_max = (params.x_center - 0.5 + dx_out_solid).floor() as i16;
+            if right_min <= right_max {
+                solid_ranges[num_solid_ranges] = Some((right_min, right_max));
+                num_solid_ranges += 1;
+            }
+        } else {
+            let s_min = (params.x_center - 0.5 - dx_out_solid).ceil() as i16;
+            let s_max = (params.x_center - 0.5 + dx_out_solid).floor() as i16;
+            if s_min <= s_max {
+                solid_ranges[num_solid_ranges] = Some((s_min, s_max));
+                num_solid_ranges += 1;
+            }
+        }
+    }
+
+    let is_near_any_cap = is_near_cap_start_y || is_near_cap_end_y;
+
     for i in 0..num_ranges {
         let (r_start, r_end) = ranges[i];
         
-        let mut dx = (line_start_x + r_start as i16) as f32 + 0.5 - params.x_center;
-        let mut p_cross_vs = dx * params.start_sin - vs_cross_y;
-        let mut p_cross_ve = dx * params.end_sin - ve_cross_y;
-
-        for idx in r_start..r_end {
-            let dist_sq = dx * dx + dy_sq;
-
-            let is_inside = if params.is_full_circle {
-                true
+        let dx = (line_start_x + r_start as i16) as f32 + 0.5 - params.x_center;
+        let p_cross_vs = dx * params.start_sin - vs_cross_y;
+        let p_cross_ve = dx * params.end_sin - ve_cross_y;
+        
+        let dx_r_start = dx;
+        let dx_r_end = dx + (r_end - 1 - r_start) as f32;
+        
+        let p_cross_vs_r_end = p_cross_vs + (r_end - 1 - r_start) as f32 * params.start_sin;
+        let p_cross_ve_r_end = p_cross_ve + (r_end - 1 - r_start) as f32 * params.end_sin;
+        
+        let is_inside_r_start = if params.is_full_circle {
+            true
+        } else {
+            if params.is_sweep_less_180 {
+                p_cross_vs <= 0.0 && p_cross_ve >= 0.0
             } else {
-                if params.is_sweep_less_180 {
-                    p_cross_vs <= 0.0 && p_cross_ve >= 0.0
-                } else {
-                    !(p_cross_ve <= 0.0 && p_cross_vs >= 0.0)
-                }
-            };
+                !(p_cross_ve <= 0.0 && p_cross_vs >= 0.0)
+            }
+        };
+        
+        let is_inside_r_end = if params.is_full_circle {
+            true
+        } else {
+            if params.is_sweep_less_180 {
+                p_cross_vs_r_end <= 0.0 && p_cross_ve_r_end >= 0.0
+            } else {
+                !(p_cross_ve_r_end <= 0.0 && p_cross_vs_r_end >= 0.0)
+            }
+        };
+        
+        let sign_vs_ok = params.is_full_circle || (p_cross_vs >= 0.0) == (p_cross_vs_r_end >= 0.0);
+        let sign_ve_ok = params.is_full_circle || (p_cross_ve >= 0.0) == (p_cross_ve_r_end >= 0.0);
+        
+        let start_cap_safe = params.is_full_circle || !is_near_cap_start_y
+            || dx_r_end < params.cap_start_x - params.cap_expansion
+            || dx_r_start > params.cap_start_x + params.cap_expansion;
+            
+        let end_cap_safe = params.is_full_circle || !is_near_cap_end_y
+            || dx_r_end < params.cap_end_x - params.cap_expansion
+            || dx_r_start > params.cap_end_x + params.cap_expansion;
+            
+        let range_completely_outside = !is_inside_r_start && !is_inside_r_end && sign_vs_ok && sign_ve_ok && start_cap_safe && end_cap_safe;
 
-            // Fast-path skip for empty pixels not near caps
-            if !is_inside {
-                let dx_diff_start = (dx - params.cap_start_x).abs();
-                let dy_diff_start = (dy - params.cap_start_y).abs();
-                let mut near_cap = dx_diff_start <= params.cap_expansion && dy_diff_start <= params.cap_expansion;
-                
-                if !near_cap {
-                    let dx_diff_end = (dx - params.cap_end_x).abs();
-                    let dy_diff_end = (dy - params.cap_end_y).abs();
-                    near_cap = dx_diff_end <= params.cap_expansion && dy_diff_end <= params.cap_expansion;
+        if range_completely_outside {
+            continue;
+        }
+
+        if !is_near_any_cap {
+            // Find intersection with the inside sweep intervals
+            let mut inside_ranges = [None; 2];
+            let mut num_inside_ranges = 0;
+
+            if params.is_full_circle {
+                inside_ranges[0] = Some((dx_r_start, dx_r_end));
+                num_inside_ranges = 1;
+            } else {
+                let x_vs = if params.start_sin.abs() > 1e-5 {
+                    vs_cross_y * params.inv_start_sin
+                } else {
+                    if vs_cross_y >= 0.0 { f32::NEG_INFINITY } else { f32::INFINITY }
+                };
+                let x_ve = if params.end_sin.abs() > 1e-5 {
+                    ve_cross_y * params.inv_end_sin
+                } else {
+                    if ve_cross_y <= 0.0 { f32::INFINITY } else { f32::NEG_INFINITY }
+                };
+
+                if params.is_sweep_less_180 {
+                    let mut min_x = f32::NEG_INFINITY;
+                    let mut max_x = f32::INFINITY;
+                    if params.start_sin > 0.0 {
+                        max_x = max_x.min(x_vs);
+                    } else if params.start_sin < 0.0 {
+                        min_x = min_x.max(x_vs);
+                    } else if vs_cross_y < 0.0 {
+                        max_x = f32::NEG_INFINITY;
+                    }
+
+                    if params.end_sin > 0.0 {
+                        min_x = min_x.max(x_ve);
+                    } else if params.end_sin < 0.0 {
+                        max_x = max_x.min(x_ve);
+                    } else if ve_cross_y > 0.0 {
+                        max_x = f32::NEG_INFINITY;
+                    }
+
+                    let intersect_min = min_x.max(dx_r_start);
+                    let intersect_max = max_x.min(dx_r_end);
+                    if intersect_min <= intersect_max {
+                        inside_ranges[0] = Some((intersect_min, intersect_max));
+                        num_inside_ranges = 1;
+                    }
+                } else {
+                    let mut gap_min = f32::NEG_INFINITY;
+                    let mut gap_max = f32::INFINITY;
+                    if params.end_sin > 0.0 {
+                        gap_max = gap_max.min(x_ve);
+                    } else if params.end_sin < 0.0 {
+                        gap_min = gap_min.max(x_ve);
+                    } else if ve_cross_y > 0.0 {
+                        gap_max = f32::NEG_INFINITY;
+                    }
+
+                    if params.start_sin > 0.0 {
+                        gap_min = gap_min.max(x_vs);
+                    } else if params.start_sin < 0.0 {
+                        gap_max = gap_max.min(x_vs);
+                    } else if vs_cross_y < 0.0 {
+                        gap_max = f32::NEG_INFINITY;
+                    }
+
+                    if gap_min < gap_max {
+                        let left_min = dx_r_start;
+                        let left_max = dx_r_end.min(gap_min);
+                        if left_min <= left_max {
+                            inside_ranges[num_inside_ranges] = Some((left_min, left_max));
+                            num_inside_ranges += 1;
+                        }
+
+                        let right_min = dx_r_start.max(gap_max);
+                        let right_max = dx_r_end;
+                        if right_min <= right_max {
+                            inside_ranges[num_inside_ranges] = Some((right_min, right_max));
+                            num_inside_ranges += 1;
+                        }
+                    } else {
+                        inside_ranges[0] = Some((dx_r_start, dx_r_end));
+                        num_inside_ranges = 1;
+                    }
                 }
+            }
+
+            for j in 0..num_inside_ranges {
+                if let Some((sub_dx_start, sub_dx_end)) = inside_ranges[j] {
+                    let sub_start = (sub_dx_start - dx_r_start + r_start as f32).round() as usize;
+                    let sub_end = (sub_dx_end - dx_r_start + r_start as f32).round() as usize + 1;
+                    let sub_start = sub_start.clamp(r_start, r_end);
+                    let sub_end = sub_end.clamp(r_start, r_end);
+
+                    if sub_start < sub_end {
+                        let (s_start_sub, s_end_sub) = if DISABLE_AA {
+                            (sub_start, sub_end)
+                        } else {
+                            let mut s_start_sub = sub_start;
+                            let mut s_end_sub = sub_start;
+                            for sr in &solid_ranges[0..num_solid_ranges] {
+                                if let Some((s_phys_min, s_phys_max)) = *sr {
+                                    let intersect_min = s_phys_min.max(line_start_x + sub_start as i16);
+                                    let intersect_max = s_phys_max.min(line_start_x + sub_end as i16 - 1);
+                                    
+                                    if intersect_min <= intersect_max {
+                                        s_start_sub = (intersect_min - line_start_x) as usize;
+                                        s_end_sub = (intersect_max + 1 - line_start_x) as usize;
+                                        break;
+                                    }
+                                }
+                            }
+                            (s_start_sub, s_end_sub)
+                        };
+
+                        // 1. Draw leading non-solid/AA edge
+                        let leading_is_outer = num_ranges == 1 || i == 0;
+                        let mut sub_dx = dx_r_start + (sub_start - r_start) as f32;
+                        for idx in sub_start..s_start_sub {
+                            let dist_sq = sub_dx * sub_dx + dy_sq;
+                            let dist_to_shape = if leading_is_outer {
+                                (dist_sq - params.r_outer_sq) * params.inv_2_r_outer
+                            } else {
+                                (params.r_inner_sq - dist_sq) * params.inv_2_r_inner
+                            };
+                            let dist_to_shape = dist_to_shape.max(-0.5);
+                            if dist_to_shape < 0.5 {
+                                let alpha_i32 = (128.0 - dist_to_shape * 256.0) as i32;
+                                let alpha_u8 = alpha_i32.clamp(0, 256) as u32;
+                                if alpha_u8 > 0 {
+                                    let c = PremultipliedRgbaColor {
+                                        alpha: ((arc.stroke_color.alpha as u32 * alpha_u8) >> 8) as u8,
+                                        red: ((arc.stroke_color.red as u32 * alpha_u8) >> 8) as u8,
+                                        green: ((arc.stroke_color.green as u32 * alpha_u8) >> 8) as u8,
+                                        blue: ((arc.stroke_color.blue as u32 * alpha_u8) >> 8) as u8,
+                                    };
+                                    line_buffer[idx].blend(c);
+                                }
+                            }
+                            sub_dx += 1.0;
+                        }
+
+                        // 2. Draw solid middle using bulk fill/blend
+                        if s_start_sub < s_end_sub {
+                            if is_opaque {
+                                line_buffer[s_start_sub..s_end_sub].fill(solid_color_pixel);
+                            } else {
+                                Pixel::blend_slice(&mut line_buffer[s_start_sub..s_end_sub], arc.stroke_color);
+                            }
+                        }
+
+                        // 3. Draw trailing non-solid/AA edge
+                        let trailing_is_outer = num_ranges == 1 || i == 1;
+                        let mut sub_dx = dx_r_start + (s_end_sub - r_start) as f32;
+                        for idx in s_end_sub..sub_end {
+                            let dist_sq = sub_dx * sub_dx + dy_sq;
+                            let dist_to_shape = if trailing_is_outer {
+                                (dist_sq - params.r_outer_sq) * params.inv_2_r_outer
+                            } else {
+                                (params.r_inner_sq - dist_sq) * params.inv_2_r_inner
+                            };
+                            let dist_to_shape = dist_to_shape.max(-0.5);
+                            if dist_to_shape < 0.5 {
+                                let alpha_i32 = (128.0 - dist_to_shape * 256.0) as i32;
+                                let alpha_u8 = alpha_i32.clamp(0, 256) as u32;
+                                if alpha_u8 > 0 {
+                                    let c = PremultipliedRgbaColor {
+                                        alpha: ((arc.stroke_color.alpha as u32 * alpha_u8) >> 8) as u8,
+                                        red: ((arc.stroke_color.red as u32 * alpha_u8) >> 8) as u8,
+                                        green: ((arc.stroke_color.green as u32 * alpha_u8) >> 8) as u8,
+                                        blue: ((arc.stroke_color.blue as u32 * alpha_u8) >> 8) as u8,
+                                    };
+                                    line_buffer[idx].blend(c);
+                                }
+                            }
+                            sub_dx += 1.0;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Fallback path: range overlaps cap. Simple loop without division or sorting.
+            let mut local_dx = dx;
+            let mut local_p_cross_vs = p_cross_vs;
+            let mut local_p_cross_ve = p_cross_ve;
+
+            for idx in r_start..r_end {
+                let dist_sq = local_dx * local_dx + dy_sq;
+                let is_inside = if params.is_full_circle {
+                    true
+                } else {
+                    if params.is_sweep_less_180 {
+                        local_p_cross_vs <= 0.0 && local_p_cross_ve >= 0.0
+                    } else {
+                        !(local_p_cross_ve <= 0.0 && local_p_cross_vs >= 0.0)
+                    }
+                };
                 
-                if !near_cap {
-                    dx += 1.0;
-                    p_cross_vs += params.start_sin;
-                    p_cross_ve += params.end_sin;
+                if !is_inside {
+                    let mut near_cap = is_near_cap_start_y && (local_dx - params.cap_start_x).abs() <= params.cap_expansion;
+                    if !near_cap {
+                        near_cap = is_near_cap_end_y && (local_dx - params.cap_end_x).abs() <= params.cap_expansion;
+                    }
+                    
+                    if !near_cap {
+                        local_dx += 1.0;
+                        local_p_cross_vs += params.start_sin;
+                        local_p_cross_ve += params.end_sin;
+                        continue;
+                    }
+                }
+
+                let is_solid = is_inside && dist_sq <= r_out_solid_sq && dist_sq >= r_in_solid_sq;
+                if is_solid {
+                    if is_opaque {
+                        line_buffer[idx] = solid_color_pixel;
+                    } else {
+                        line_buffer[idx].blend(arc.stroke_color);
+                    }
+                    local_dx += 1.0;
+                    local_p_cross_vs += params.start_sin;
+                    local_p_cross_ve += params.end_sin;
                     continue;
                 }
-            }
 
-            // Fast-path for completely solid pixels (alpha = 1.0)
-            let is_solid = is_inside && dist_sq <= params.r_out_solid_sq && dist_sq >= params.r_in_solid_sq;
-            if is_solid {
-                if is_opaque {
-                    line_buffer[idx] = solid_color_pixel;
+                let dist_to_shape = if is_inside {
+                    let d_out = (dist_sq - params.r_outer_sq) * params.inv_2_r_outer;
+                    let d_in = (params.r_inner_sq - dist_sq) * params.inv_2_r_inner;
+                    d_out.max(d_in)
                 } else {
-                    line_buffer[idx].blend(arc.stroke_color);
-                }
-                
-                dx += 1.0;
-                p_cross_vs += params.start_sin;
-                p_cross_ve += params.end_sin;
-                continue;
-            }
-            
-            // Fallback to f32 for anti-aliased edge and cap pixels
-            let dist_to_shape = if is_inside {
-                let d_out = (dist_sq - params.r_outer_sq) * params.inv_2_r_outer;
-                let d_in = (params.r_inner_sq - dist_sq) * params.inv_2_r_inner;
-                d_out.max(d_in)
-            } else {
-                match arc.stroke_line_cap {
-                    i_slint_core::items::LineCap::Round => {
-                        let dist_sq_start = (dx - params.cap_start_x) * (dx - params.cap_start_x) + dy_minus_cap_start_y_sq;
-                        let dist_sq_end = (dx - params.cap_end_x) * (dx - params.cap_end_x) + dy_minus_cap_end_y_sq;
-                        
-                        let dist_to_start_cap = if dist_sq_start > params.cap_r_out_sq {
-                            1.0
-                        } else if dist_sq_start <= params.cap_r_in_sq {
-                            -1.0
-                        } else {
-                            (dist_sq_start - params.r_cap_sq) * params.inv_2_r_cap
-                        };
-                        
-                        let dist_to_end_cap = if dist_sq_end > params.cap_r_out_sq {
-                            1.0
-                        } else if dist_sq_end <= params.cap_r_in_sq {
-                            -1.0
-                        } else {
-                            (dist_sq_end - params.r_cap_sq) * params.inv_2_r_cap
-                        };
-                        dist_to_start_cap.min(dist_to_end_cap)
+                    match arc.stroke_line_cap {
+                        i_slint_core::items::LineCap::Round => {
+                            let dist_sq_start = (local_dx - params.cap_start_x) * (local_dx - params.cap_start_x) + dy_minus_cap_start_y_sq;
+                            let dist_sq_end = (local_dx - params.cap_end_x) * (local_dx - params.cap_end_x) + dy_minus_cap_end_y_sq;
+                            
+                            let (dist_to_start_cap, dist_to_end_cap) = if DISABLE_AA {
+                                (
+                                    if dist_sq_start <= params.r_cap_sq { -1.0 } else { 1.0 },
+                                    if dist_sq_end <= params.r_cap_sq { -1.0 } else { 1.0 }
+                                )
+                            } else {
+                                (
+                                    if dist_sq_start > params.cap_r_out_sq {
+                                        1.0
+                                    } else if dist_sq_start <= params.cap_r_in_sq {
+                                        -1.0
+                                    } else {
+                                        (dist_sq_start - params.r_cap_sq) * params.inv_2_r_cap
+                                    },
+                                    if dist_sq_end > params.cap_r_out_sq {
+                                        1.0
+                                    } else if dist_sq_end <= params.cap_r_in_sq {
+                                        -1.0
+                                    } else {
+                                        (dist_sq_end - params.r_cap_sq) * params.inv_2_r_cap
+                                    }
+                                )
+                            };
+                            dist_to_start_cap.min(dist_to_end_cap)
+                        }
+                        i_slint_core::items::LineCap::Square => {
+                            let p_dot_vs = local_dx * params.start_cos + vs_dot_y;
+                            let p_dot_ve = local_dx * params.end_cos + ve_dot_y;
+
+                            let dist_to_ray_unsigned = if p_dot_vs > p_dot_ve {
+                                local_p_cross_vs.abs()
+                            } else {
+                                local_p_cross_ve.abs()
+                            };
+                            let dist_to_ray = dist_to_ray_unsigned - params.stroke_width / 2.0;
+
+                            let p_dot = if p_dot_vs > p_dot_ve { p_dot_vs } else { p_dot_ve };
+                            let dist_along_ray = p_dot;
+
+                            let d = dist_to_ray.max(dist_along_ray);
+                            if DISABLE_AA {
+                                if d <= 0.0 { -1.0 } else { 1.0 }
+                            } else {
+                                d
+                            }
+                        }
+                        _ => 1.0,
                     }
-                    i_slint_core::items::LineCap::Square => {
-                        let p_cross_vs = dx * params.start_sin - vs_cross_y;
-                        let p_cross_ve = dx * params.end_sin - ve_cross_y;
-                        let p_dot_vs = dx * params.start_cos + vs_dot_y;
-                        let p_dot_ve = dx * params.end_cos + ve_dot_y;
+                };
 
-                        let dist_to_ray_unsigned = if p_dot_vs > p_dot_ve {
-                            p_cross_vs.abs()
-                        } else {
-                            p_cross_ve.abs()
+                let dist_to_shape = dist_to_shape.max(-0.5);
+                if dist_to_shape < 0.5 {
+                    let alpha_i32 = (128.0 - dist_to_shape * 256.0) as i32;
+                    let alpha_u8 = alpha_i32.clamp(0, 256) as u32;
+                    if alpha_u8 > 0 {
+                        let c = PremultipliedRgbaColor {
+                            alpha: ((arc.stroke_color.alpha as u32 * alpha_u8) >> 8) as u8,
+                            red: ((arc.stroke_color.red as u32 * alpha_u8) >> 8) as u8,
+                            green: ((arc.stroke_color.green as u32 * alpha_u8) >> 8) as u8,
+                            blue: ((arc.stroke_color.blue as u32 * alpha_u8) >> 8) as u8,
                         };
-                        let dist_to_ray = dist_to_ray_unsigned - params.stroke_width / 2.0;
-
-                        let p_dot = if p_dot_vs > p_dot_ve { p_dot_vs } else { p_dot_ve };
-                        let dist_along_ray = p_dot;
-
-                        dist_to_ray.max(dist_along_ray)
+                        line_buffer[idx].blend(c);
                     }
-                    _ => 1.0,
                 }
-            };
 
-            let dist_to_shape = dist_to_shape.max(-0.5);
-
-            if dist_to_shape < 0.5 {
-                let mut alpha = 0.5 - dist_to_shape;
-                alpha = alpha.max(0.0).min(1.0);
-                let color_alpha = arc.stroke_color.alpha as f32 / 255.0;
-                let final_alpha = (alpha * color_alpha * 255.0) as u8;
-
-                if final_alpha > 0 {
-                    let c = Color::from_argb_u8(
-                        final_alpha,
-                        arc.stroke_color.red,
-                        arc.stroke_color.green,
-                        arc.stroke_color.blue,
-                    );
-                    line_buffer[idx].blend(c.into());
-                }
+                local_dx += 1.0;
+                local_p_cross_vs += params.start_sin;
+                local_p_cross_ve += params.end_sin;
             }
-
-            dx += 1.0;
-            p_cross_vs += params.start_sin;
-            p_cross_ve += params.end_sin;
         }
     }
 }
