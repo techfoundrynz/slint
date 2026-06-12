@@ -1202,7 +1202,7 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
     
     let dy_sq = dy * dy;
 
-    const DISABLE_AA: bool = true;
+    const DISABLE_AA: bool = false;
     let r_out_solid_sq = if DISABLE_AA { params.r_out_sq } else { params.r_out_solid_sq };
     let r_in_solid_sq = if DISABLE_AA { params.r_in_sq } else { params.r_in_solid_sq };
 
@@ -1216,10 +1216,11 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
 
     let dx_max_sq = params.r_out_sq - dy_sq;
     if dx_max_sq < 0.0 { return; }
-    let dx_max = dx_max_sq.sqrt() + 1.0;
-    
-    let x_start_phys = (params.x_center - dx_max).floor() as i16;
-    let x_end_phys = (params.x_center + dx_max).ceil() as i16;
+    let dx_max = dx_max_sq.sqrt();
+
+    // Pixel X is covered iff |X + 0.5 - x_center| <= dx_max
+    let x_start_phys = (params.x_center - 0.5 - dx_max).ceil() as i16;
+    let x_end_phys = (params.x_center - 0.5 + dx_max).floor() as i16 + 1;
 
     let start_idx = (x_start_phys - line_start_x).max(0) as usize;
     let end_idx = (x_end_phys - line_start_x).min(line_buffer.len() as i16).max(0) as usize;
@@ -1271,7 +1272,7 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
         let dx_out_solid = dx_out_solid_sq.sqrt();
         let dx_in_solid = if r_in_solid_sq > dy_sq {
             let dx_in_solid_sq = r_in_solid_sq - dy_sq;
-            dx_in_solid_sq.sqrt() + 1.0
+            dx_in_solid_sq.sqrt()
         } else {
             0.0
         };
@@ -1466,15 +1467,12 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
                         };
 
                         // 1. Draw leading non-solid/AA edge
-                        let leading_is_outer = num_ranges == 1 || i == 0;
                         let mut sub_dx = dx_r_start + (sub_start - r_start) as f32;
                         for idx in sub_start..s_start_sub {
                             let dist_sq = sub_dx * sub_dx + dy_sq;
-                            let dist_to_shape = if leading_is_outer {
-                                (dist_sq - params.r_outer_sq) * params.inv_2_r_outer
-                            } else {
-                                (params.r_inner_sq - dist_sq) * params.inv_2_r_inner
-                            };
+                            let d_out = (dist_sq - params.r_outer_sq) * params.inv_2_r_outer;
+                            let d_in = (params.r_inner_sq - dist_sq) * params.inv_2_r_inner;
+                            let dist_to_shape = d_out.max(d_in);
                             let dist_to_shape = dist_to_shape.max(-0.5);
                             if dist_to_shape < 0.5 {
                                 let alpha_i32 = (128.0 - dist_to_shape * 256.0) as i32;
@@ -1502,15 +1500,12 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
                         }
 
                         // 3. Draw trailing non-solid/AA edge
-                        let trailing_is_outer = num_ranges == 1 || i == 1;
                         let mut sub_dx = dx_r_start + (s_end_sub - r_start) as f32;
                         for idx in s_end_sub..sub_end {
                             let dist_sq = sub_dx * sub_dx + dy_sq;
-                            let dist_to_shape = if trailing_is_outer {
-                                (dist_sq - params.r_outer_sq) * params.inv_2_r_outer
-                            } else {
-                                (params.r_inner_sq - dist_sq) * params.inv_2_r_inner
-                            };
+                            let d_out = (dist_sq - params.r_outer_sq) * params.inv_2_r_outer;
+                            let d_in = (params.r_inner_sq - dist_sq) * params.inv_2_r_inner;
+                            let dist_to_shape = d_out.max(d_in);
                             let dist_to_shape = dist_to_shape.max(-0.5);
                             if dist_to_shape < 0.5 {
                                 let alpha_i32 = (128.0 - dist_to_shape * 256.0) as i32;
