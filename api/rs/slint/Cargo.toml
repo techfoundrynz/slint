@@ -60,6 +60,10 @@ software-renderer-systemfonts = ["renderer-software"]
 # `std` feature, but can be enabled without `std` if you want to use the software renderer in a `#![no_std]` environment and need support for Path elements.
 software-renderer-path = ["i-slint-renderer-software/path"]
 
+# Disable anti-aliasing in the software renderer for maximum performance on constrained targets.
+# Edges of text, rounded rectangles, and arcs are rendered with hard pixel boundaries.
+disable-aa = ["i-slint-renderer-software?/disable-aa"]
+
 ## Slint uses internally some `thread_local` state.
 ##
 ## When the `std` feature is enabled, Slint can use [`std::thread_local!`], but when in a `#![no_std]`

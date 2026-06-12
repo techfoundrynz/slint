@@ -1202,7 +1202,7 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
     
     let dy_sq = dy * dy;
 
-    const DISABLE_AA: bool = false;
+    const DISABLE_AA: bool = cfg!(feature = "disable-aa");
     let r_out_solid_sq = if DISABLE_AA { params.r_out_sq } else { params.r_out_solid_sq };
     let r_in_solid_sq = if DISABLE_AA { params.r_in_sq } else { params.r_in_solid_sq };
 
