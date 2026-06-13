@@ -22,7 +22,7 @@ use crate::item_rendering::{
 };
 use crate::item_tree::{ItemTreeRc, ItemTreeWeak, ItemVisitorResult};
 #[cfg(feature = "path")]
-use crate::items::Path;
+use crate::items::{ArcSegment, Path};
 #[cfg(feature = "path")]
 use crate::item_rendering::RenderArc;
 use crate::items::{BoxShadow, Clip, ItemRc, ItemRef, Layer, Opacity, RenderingResult, TextInput};
@@ -158,15 +158,34 @@ impl CachedItemBoundingBoxAndTransform {
     }
 }
 
+/// Snapshot of an ArcSegment's angles and geometry as painted to one physical buffer.
+/// Used to compute tight dirty regions instead of dirtying the full arc bbox.
+#[cfg(feature = "path")]
+#[derive(Clone, Debug, PartialEq)]
+struct ArcAngles {
+    start_angle: f32,
+    end_angle: f32,
+    item_geometry: LogicalRect,
+    stroke_half_width: f32,
+}
+
 struct PartialRenderingCachedData {
     /// The geometry of the item as it was previously rendered.
     pub data: CachedItemBoundingBoxAndTransform,
     /// The property tracker that should be used to evaluate whether the item needs to be re-rendered
     pub tracker: Option<core::pin::Pin<Box<PropertyTracker>>>,
+    /// Per-buffer arc angle snapshots for ArcSegment items (index 0 = buffer 0, index 1 = buffer 1).
+    #[cfg(feature = "path")]
+    pub arc_angles: [Option<ArcAngles>; 2],
 }
 impl PartialRenderingCachedData {
     fn new(data: CachedItemBoundingBoxAndTransform) -> Self {
-        Self { data, tracker: None }
+        Self {
+            data,
+            tracker: None,
+            #[cfg(feature = "path")]
+            arc_angles: [None, None],
+        }
     }
 }
 
@@ -355,10 +374,37 @@ pub enum RepaintBufferType {
 /// Put this structure in the renderer to help with partial rendering
 ///
 /// This is constructed from a [`PartialRenderingState`]
+#[cfg(feature = "path")]
+fn mark_arc_dirty_segments<T: ItemRenderer + ItemRendererFeatures>(
+    renderer: &mut PartialRenderer<'_, T>,
+    geometry: LogicalRect,
+    stroke_half_width: f32,
+    start_angle: f32,
+    end_angle: f32,
+    transform: ItemTransform,
+    clip_rect: &LogicalRect,
+) {
+    let min_angle = f32::min(start_angle, end_angle);
+    let max_angle = f32::max(start_angle, end_angle);
+    let sweep = max_angle - min_angle;
+    
+    // Split the arc into 4 segments to ensure the dirty rectangles are tight.
+    const N: usize = 4;
+    let step = sweep / (N as f32);
+    for i in 0..N {
+        let lo = min_angle + (i as f32) * step;
+        let hi = min_angle + ((i + 1) as f32) * step;
+        let rect = crate::items::arc_bounding_rect_for_angles(geometry, stroke_half_width, lo, hi);
+        renderer.mark_dirty_rect(&rect, transform, clip_rect);
+    }
+}
+
 pub struct PartialRenderer<'a, T> {
     cache: &'a RefCell<PartialRendererCache>,
     /// The region of the screen which is considered dirty and that should be repainted
     pub dirty_region: DirtyRegion,
+    /// The buffer index being rendered this frame.
+    pub buffer_index: usize,
     /// The actual renderer which the drawing call will be forwarded to
     pub actual_renderer: T,
     /// The window adapter the renderer is rendering into.
@@ -370,10 +416,11 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
     fn new(
         cache: &'a RefCell<PartialRendererCache>,
         initial_dirty_region: DirtyRegion,
+        buffer_index: usize,
         actual_renderer: T,
     ) -> Self {
         let window_adapter = actual_renderer.window().window_adapter();
-        Self { cache, dirty_region: initial_dirty_region, actual_renderer, window_adapter }
+        Self { cache, dirty_region: initial_dirty_region, buffer_index, actual_renderer, window_adapter }
     }
 
     /// Visit the tree of item and compute what are the dirty regions
@@ -417,9 +464,9 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                 let rendering_data = item.cached_rendering_data_offset();
                 let mut cache = self.cache.borrow_mut();
                 match rendering_data.get_entry(&mut cache) {
-                    Some(PartialRenderingCachedData { data: cached_geom, tracker }) => {
-                        let rendering_dirty = tracker.as_ref().is_some_and(|tr| tr.is_dirty());
-                        let old_geom = cached_geom.clone();
+                    Some(entry) => {
+                        let rendering_dirty = entry.tracker.as_ref().is_some_and(|tr| tr.is_dirty());
+                        let old_geom = entry.data.clone();
 
                         let geometry_changed = old_geom != new_geom;
                         if ItemRef::downcast_pin::<Clip>(item).is_some()
@@ -431,11 +478,63 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
 
                             if rendering_dirty {
                                 // Destroy the tracker as we we might not re-render this clipped item but it would stay dirty
-                                *tracker = None;
+                                entry.tracker = None;
                             }
                         }
 
                         if geometry_changed {
+                            #[cfg(feature = "path")]
+                            'arc_dirty: {
+                                let Some(arc) = ItemRef::downcast_pin::<ArcSegment>(item)
+                                    else { break 'arc_dirty; };
+                                let item_geometry = item_rc.geometry();
+                                let shw = arc.stroke_width().get() / 2.0;
+                                let cur_start = arc.start_angle();
+                                let cur_end = arc.end_angle();
+                                let buf_idx = self.buffer_index;
+
+                                let old_angles = entry.arc_angles[buf_idx].clone();
+                                entry.arc_angles[buf_idx] = Some(ArcAngles {
+                                    start_angle: cur_start,
+                                    end_angle: cur_end,
+                                    item_geometry,
+                                    stroke_half_width: shw,
+                                });
+
+                                // Fall back to full bounding box dirtying if this is the first render to this buffer,
+                                // or if geometry/stroke width changed.
+                                let Some(old) = old_angles else { break 'arc_dirty; };
+                                if old.item_geometry != item_geometry || old.stroke_half_width != shw {
+                                    break 'arc_dirty;
+                                }
+
+                                // Mark the entire old arc as dirty in 4 segments
+                                mark_arc_dirty_segments(
+                                    self,
+                                    old.item_geometry,
+                                    old.stroke_half_width,
+                                    old.start_angle,
+                                    old.end_angle,
+                                    state.old_transform_to_screen,
+                                    &state.clipped,
+                                );
+
+                                // Mark the entire new arc as dirty in 4 segments
+                                mark_arc_dirty_segments(
+                                    self,
+                                    item_geometry,
+                                    shw,
+                                    cur_start,
+                                    cur_end,
+                                    state.transform_to_screen,
+                                    &state.clipped,
+                                );
+
+                                new_state.adjust_transforms_for_child(&new_geom.transform(), &old_geom.transform());
+                                entry.data = new_geom;
+                                return ItemVisitorResult::Continue(new_state);
+                            }
+
                             self.mark_dirty_rect(
                                 old_geom.bounding_rect(),
                                 state.old_transform_to_screen,
@@ -452,19 +551,19 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                 &old_geom.transform(),
                             );
 
-                            *cached_geom = new_geom;
+                            entry.data = new_geom;
 
                             return ItemVisitorResult::Continue(new_state);
                         }
 
                         new_state.adjust_transforms_for_child(
-                            &cached_geom.transform(),
-                            &cached_geom.transform(),
+                            &entry.data.transform(),
+                            &entry.data.transform(),
                         );
 
                         if rendering_dirty {
                             self.mark_dirty_rect(
-                                cached_geom.bounding_rect(),
+                                entry.data.bounding_rect(),
                                 state.transform_to_screen,
                                 &state.clipped,
                             );
@@ -476,21 +575,21 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                     != new_state.old_transform_to_screen
                             {
                                 self.mark_dirty_rect(
-                                    cached_geom.bounding_rect(),
+                                    entry.data.bounding_rect(),
                                     state.old_transform_to_screen,
                                     &state.clipped,
                                 );
                                 self.mark_dirty_rect(
-                                    cached_geom.bounding_rect(),
+                                    entry.data.bounding_rect(),
                                     state.transform_to_screen,
                                     &state.clipped,
                                 );
-                            } else if let Some(tr) = &tracker {
+                            } else if let Some(tr) = &entry.tracker {
                                 tr.as_ref().register_as_dependency_to_current_binding();
                             }
 
                             if let CachedItemBoundingBoxAndTransform::ClipItem { geometry } =
-                                &cached_geom
+                                &entry.data
                             {
                                 new_state.clipped = new_state
                                     .clipped
@@ -515,7 +614,19 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                         }
                     }
                     None => {
-                        let cache_entry = PartialRenderingCachedData::new(new_geom.clone());
+                        let mut cache_entry = PartialRenderingCachedData::new(new_geom.clone());
+
+                        // Seed per-buffer arc state so the NEXT render to this buffer can use segment dirtying.
+                        #[cfg(feature = "path")]
+                        if let Some(arc) = ItemRef::downcast_pin::<ArcSegment>(item) {
+                            cache_entry.arc_angles[self.buffer_index] = Some(ArcAngles {
+                                start_angle: arc.start_angle(),
+                                end_angle: arc.end_angle(),
+                                item_geometry: item_rc.geometry(),
+                                stroke_half_width: arc.stroke_width().get() / 2.0,
+                            });
+                        }
+
                         rendering_data.cache_index.set(cache.insert(cache_entry));
                         rendering_data.cache_generation.set(cache.generation());
 
@@ -647,7 +758,7 @@ impl<T: ItemRenderer + ItemRendererFeatures> ItemRenderer for PartialRenderer<'_
         let rendering_data = item.cached_rendering_data_offset();
         let mut cache = self.cache.borrow_mut();
         let item_bounding_rect = match rendering_data.get_entry(&mut cache) {
-            Some(PartialRenderingCachedData { data, tracker: _ }) => *data.bounding_rect(),
+            Some(entry) => *entry.data.bounding_rect(),
             None => {
                 // This item was created between the computation of the dirty region and the actual rendering.
                 item_rc.bounding_rect(&item_geometry, window_adapter)
@@ -777,8 +888,9 @@ impl PartialRenderingState {
     pub fn create_partial_renderer<T: ItemRenderer + ItemRendererFeatures>(
         &self,
         renderer: T,
+        buffer_index: usize,
     ) -> PartialRenderer<'_, T> {
-        PartialRenderer::new(&self.partial_cache, self.force_dirty.take(), renderer)
+        PartialRenderer::new(&self.partial_cache, self.force_dirty.take(), buffer_index, renderer)
     }
 
     /// Compute the correct partial rendering region based on the components to be drawn, the bounding rectangles of
