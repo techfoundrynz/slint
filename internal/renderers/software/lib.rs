@@ -440,9 +440,6 @@ pub struct SoftwareRenderer {
     /// This is the area which was dirty on the previous frame.
     /// Only used if repaint_buffer_type == RepaintBufferType::SwappedBuffers
     prev_frame_dirty: Cell<DirtyRegion>,
-    /// Which physical buffer index (0 or 1) is being rendered this frame.
-    /// Alternates each frame for SwappedBuffers; stays 0 for ReusedBuffer/NewBuffer.
-    swap_buffer_index: Cell<usize>,
     partial_rendering_state: PartialRenderingState,
     maybe_window_adapter: RefCell<Option<Weak<dyn i_slint_core::window::WindowAdapter>>>,
     rotation: Cell<RenderingRotation>,
@@ -456,7 +453,6 @@ impl Default for SoftwareRenderer {
         Self {
             partial_rendering_state: Default::default(),
             prev_frame_dirty: Default::default(),
-            swap_buffer_index: Cell::new(0),
             maybe_window_adapter: Default::default(),
             rotation: Default::default(),
             rendering_metrics_collector: RenderingMetricsCollector::new("software"),
@@ -495,7 +491,6 @@ impl SoftwareRenderer {
     /// This may clear the internal caches
     pub fn set_repaint_buffer_type(&self, repaint_buffer_type: RepaintBufferType) {
         if self.repaint_buffer_type.replace(repaint_buffer_type) != repaint_buffer_type {
-            self.swap_buffer_index.set(0);
             self.partial_rendering_state.clear_cache();
         }
     }
@@ -615,7 +610,7 @@ impl SoftwareRenderer {
             #[cfg(feature = "systemfonts")]
             &self.text_layout_cache,
         );
-        let mut renderer = self.partial_rendering_state.create_partial_renderer(buffer_renderer, self.swap_buffer_index.get());
+        let mut renderer = self.partial_rendering_state.create_partial_renderer(buffer_renderer);
         let window_adapter = renderer.window_adapter.clone();
 
         window_inner
@@ -644,7 +639,6 @@ impl SoftwareRenderer {
                                 Some(self.prev_frame_dirty.take()),
                             );
                         self.prev_frame_dirty.set(dirty_region_for_this_frame);
-                        self.swap_buffer_index.set(1 - self.swap_buffer_index.get());
                     }
                 }
 
@@ -1445,7 +1439,7 @@ fn prepare_scene(
         &software_renderer.text_layout_cache,
     );
     let mut renderer =
-        software_renderer.partial_rendering_state.create_partial_renderer(prepare_scene, software_renderer.swap_buffer_index.get());
+        software_renderer.partial_rendering_state.create_partial_renderer(prepare_scene);
     let window_adapter = renderer.window_adapter.clone();
 
     let mut dirty_region = PhysicalRegion::default();
@@ -1476,7 +1470,6 @@ fn prepare_scene(
                         Some(software_renderer.prev_frame_dirty.take()),
                     );
                 software_renderer.prev_frame_dirty.set(dirty_region_for_this_frame);
-                software_renderer.swap_buffer_index.set(1 - software_renderer.swap_buffer_index.get());
             }
         }
 
