@@ -24,8 +24,6 @@ use crate::item_tree::{ItemTreeRc, ItemTreeWeak, ItemVisitorResult};
 #[cfg(feature = "path")]
 use crate::items::Path;
 #[cfg(feature = "path")]
-use crate::items::ArcSegment;
-#[cfg(feature = "path")]
 use crate::item_rendering::RenderArc;
 use crate::items::{BoxShadow, Clip, ItemRc, ItemRef, Layer, Opacity, RenderingResult, TextInput};
 use crate::lengths::{
@@ -160,36 +158,15 @@ impl CachedItemBoundingBoxAndTransform {
     }
 }
 
-/// Cached per-arc state used to compute angle-delta dirty regions.
-/// Only populated for `ArcSegment` items; all other items leave the field `None`.
-#[cfg(feature = "path")]
-#[derive(Clone)]
-struct CachedArcState {
-    start_angle: f32,
-    end_angle: f32,
-    stroke_half_width: f32,
-    element_size: LogicalSize,
-    brush: crate::graphics::Brush,
-    line_cap: crate::items::LineCap,
-}
-
 struct PartialRenderingCachedData {
     /// The geometry of the item as it was previously rendered.
     pub data: CachedItemBoundingBoxAndTransform,
     /// The property tracker that should be used to evaluate whether the item needs to be re-rendered
     pub tracker: Option<core::pin::Pin<Box<PropertyTracker>>>,
-    /// Arc-specific state for delta-dirty computation (ArcSegment items only).
-    #[cfg(feature = "path")]
-    pub arc_state: Option<CachedArcState>,
 }
 impl PartialRenderingCachedData {
     fn new(data: CachedItemBoundingBoxAndTransform) -> Self {
-        Self {
-            data,
-            tracker: None,
-            #[cfg(feature = "path")]
-            arc_state: None,
-        }
+        Self { data, tracker: None }
     }
 }
 
@@ -440,9 +417,9 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                 let rendering_data = item.cached_rendering_data_offset();
                 let mut cache = self.cache.borrow_mut();
                 match rendering_data.get_entry(&mut cache) {
-                    Some(entry) => {
-                        let rendering_dirty = entry.tracker.as_ref().is_some_and(|tr| tr.is_dirty());
-                        let old_geom = entry.data.clone();
+                    Some(PartialRenderingCachedData { data: cached_geom, tracker }) => {
+                        let rendering_dirty = tracker.as_ref().is_some_and(|tr| tr.is_dirty());
+                        let old_geom = cached_geom.clone();
 
                         let geometry_changed = old_geom != new_geom;
                         if ItemRef::downcast_pin::<Clip>(item).is_some()
@@ -454,127 +431,11 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
 
                             if rendering_dirty {
                                 // Destroy the tracker as we we might not re-render this clipped item but it would stay dirty
-                                entry.tracker = None;
+                                *tracker = None;
                             }
                         }
 
                         if geometry_changed {
-                            // For ArcSegment items: when only the arc angles changed (element
-                            // position/size, stroke, brush, and cap are all unchanged), dirty
-                            // only the angular wedge swept between the old and new endpoint
-                            // instead of the full old+new bounding box.  This prevents full-
-                            // screen repaints on every telemetry tick when a gauge value updates.
-                            #[cfg(feature = "path")]
-                            let arc_handled = 'arc: {
-                                let Some(arc_item) = ItemRef::downcast_pin::<ArcSegment>(item)
-                                    else { break 'arc false };
-                                let new_start = crate::properties::evaluate_no_tracking(
-                                    || arc_item.start_angle());
-                                let new_end = crate::properties::evaluate_no_tracking(
-                                    || arc_item.end_angle());
-                                let new_sw = crate::properties::evaluate_no_tracking(
-                                    || arc_item.stroke_width().get() / 2.0);
-                                let new_brush = crate::properties::evaluate_no_tracking(
-                                    || arc_item.stroke());
-                                let new_cap = crate::properties::evaluate_no_tracking(
-                                    || arc_item.stroke_line_cap());
-                                let new_size = crate::properties::evaluate_no_tracking(
-                                    || item_rc.geometry().size);
-
-                                // Determine whether any non-angle property changed.
-                                let angle_only = match (&entry.arc_state, &old_geom, &new_geom) {
-                                    (
-                                        Some(cached_arc),
-                                        CachedItemBoundingBoxAndTransform::RegularItem {
-                                            offset: old_offset, ..
-                                        },
-                                        CachedItemBoundingBoxAndTransform::RegularItem {
-                                            offset: new_offset, ..
-                                        },
-                                    ) => {
-                                        old_offset == new_offset
-                                            && new_size == cached_arc.element_size
-                                            && new_sw == cached_arc.stroke_half_width
-                                            && new_brush == cached_arc.brush
-                                            && new_cap == cached_arc.line_cap
-                                    }
-                                    _ => false,
-                                };
-
-                                // Compute per-endpoint delta rects before mutating arc_state.
-                                let delta_rects: [Option<LogicalRect>; 2] = if angle_only {
-                                    let cached_arc = entry.arc_state.as_ref().unwrap();
-                                    let offset = match &new_geom {
-                                        CachedItemBoundingBoxAndTransform::RegularItem {
-                                            offset, ..
-                                        } => *offset,
-                                        _ => unreachable!(),
-                                    };
-                                    let geom = LogicalRect::new(
-                                        LogicalPoint::new(offset.x, offset.y),
-                                        new_size,
-                                    );
-                                    let delta_end = if (new_end - cached_arc.end_angle).abs() > 0.01 {
-                                        let (lo, hi) = if new_end > cached_arc.end_angle {
-                                            (cached_arc.end_angle, new_end)
-                                        } else {
-                                            (new_end, cached_arc.end_angle)
-                                        };
-                                        Some(crate::items::arc_bounding_rect_for_angles(
-                                            geom, new_sw, lo, hi,
-                                        ))
-                                    } else {
-                                        None
-                                    };
-                                    let delta_start =
-                                        if (new_start - cached_arc.start_angle).abs() > 0.01 {
-                                            let (lo, hi) = if new_start > cached_arc.start_angle {
-                                                (cached_arc.start_angle, new_start)
-                                            } else {
-                                                (new_start, cached_arc.start_angle)
-                                            };
-                                            Some(crate::items::arc_bounding_rect_for_angles(
-                                                geom, new_sw, lo, hi,
-                                            ))
-                                        } else {
-                                            None
-                                        };
-                                    [delta_end, delta_start]
-                                } else {
-                                    [None, None]
-                                };
-
-                                entry.arc_state = Some(CachedArcState {
-                                    start_angle: new_start,
-                                    end_angle: new_end,
-                                    stroke_half_width: new_sw,
-                                    element_size: new_size,
-                                    brush: new_brush,
-                                    line_cap: new_cap,
-                                });
-
-                                if !angle_only {
-                                    break 'arc false;
-                                }
-
-                                // Emit the delta dirty rects and skip the full-bbox fallback.
-                                for rect in delta_rects.iter().flatten() {
-                                    self.mark_dirty_rect(
-                                        rect,
-                                        state.transform_to_screen,
-                                        &state.clipped,
-                                    );
-                                }
-                                new_state.adjust_transforms_for_child(
-                                    &new_geom.transform(),
-                                    &old_geom.transform(),
-                                );
-                                entry.data = new_geom;
-                                return ItemVisitorResult::Continue(new_state);
-                            };
-                            #[cfg(feature = "path")]
-                            let _ = arc_handled;
-
                             self.mark_dirty_rect(
                                 old_geom.bounding_rect(),
                                 state.old_transform_to_screen,
@@ -591,19 +452,19 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                 &old_geom.transform(),
                             );
 
-                            entry.data = new_geom;
+                            *cached_geom = new_geom;
 
                             return ItemVisitorResult::Continue(new_state);
                         }
 
                         new_state.adjust_transforms_for_child(
-                            &entry.data.transform(),
-                            &entry.data.transform(),
+                            &cached_geom.transform(),
+                            &cached_geom.transform(),
                         );
 
                         if rendering_dirty {
                             self.mark_dirty_rect(
-                                entry.data.bounding_rect(),
+                                cached_geom.bounding_rect(),
                                 state.transform_to_screen,
                                 &state.clipped,
                             );
@@ -615,21 +476,21 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                     != new_state.old_transform_to_screen
                             {
                                 self.mark_dirty_rect(
-                                    entry.data.bounding_rect(),
+                                    cached_geom.bounding_rect(),
                                     state.old_transform_to_screen,
                                     &state.clipped,
                                 );
                                 self.mark_dirty_rect(
-                                    entry.data.bounding_rect(),
+                                    cached_geom.bounding_rect(),
                                     state.transform_to_screen,
                                     &state.clipped,
                                 );
-                            } else if let Some(tr) = &entry.tracker {
+                            } else if let Some(tr) = &tracker {
                                 tr.as_ref().register_as_dependency_to_current_binding();
                             }
 
                             if let CachedItemBoundingBoxAndTransform::ClipItem { geometry } =
-                                &entry.data
+                                &cached_geom
                             {
                                 new_state.clipped = new_state
                                     .clipped
@@ -654,27 +515,7 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                         }
                     }
                     None => {
-                        let mut cache_entry = PartialRenderingCachedData::new(new_geom.clone());
-
-                        // Seed arc state so the first update can use delta dirty regions.
-                        #[cfg(feature = "path")]
-                        if let Some(arc_item) = ItemRef::downcast_pin::<ArcSegment>(item) {
-                            cache_entry.arc_state = Some(CachedArcState {
-                                start_angle: crate::properties::evaluate_no_tracking(
-                                    || arc_item.start_angle()),
-                                end_angle: crate::properties::evaluate_no_tracking(
-                                    || arc_item.end_angle()),
-                                stroke_half_width: crate::properties::evaluate_no_tracking(
-                                    || arc_item.stroke_width().get() / 2.0),
-                                element_size: crate::properties::evaluate_no_tracking(
-                                    || item_rc.geometry().size),
-                                brush: crate::properties::evaluate_no_tracking(
-                                    || arc_item.stroke()),
-                                line_cap: crate::properties::evaluate_no_tracking(
-                                    || arc_item.stroke_line_cap()),
-                            });
-                        }
-
+                        let cache_entry = PartialRenderingCachedData::new(new_geom.clone());
                         rendering_data.cache_index.set(cache.insert(cache_entry));
                         rendering_data.cache_generation.set(cache.generation());
 
@@ -806,7 +647,7 @@ impl<T: ItemRenderer + ItemRendererFeatures> ItemRenderer for PartialRenderer<'_
         let rendering_data = item.cached_rendering_data_offset();
         let mut cache = self.cache.borrow_mut();
         let item_bounding_rect = match rendering_data.get_entry(&mut cache) {
-            Some(PartialRenderingCachedData { data, .. }) => *data.bounding_rect(),
+            Some(PartialRenderingCachedData { data, tracker: _ }) => *data.bounding_rect(),
             None => {
                 // This item was created between the computation of the dirty region and the actual rendering.
                 item_rc.bounding_rect(&item_geometry, window_adapter)
