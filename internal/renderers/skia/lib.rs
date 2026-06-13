@@ -707,7 +707,7 @@ impl SkiaRenderer {
 
             if let Some(partial_rendering_state) = self.partial_rendering_state() {
                 partial_renderer =
-                    partial_rendering_state.create_partial_renderer(skia_item_renderer);
+                    partial_rendering_state.create_partial_renderer(skia_item_renderer, 0);
 
                 let mut dirty_region_history = self.dirty_region_history.borrow_mut();
 
