@@ -293,69 +293,88 @@ impl Item for ArcSegment {
         let end_deg = self.end_angle();
         let min_a = num_traits::Float::min(start_deg, end_deg);
         let max_a = num_traits::Float::max(start_deg, end_deg);
-        
-        if max_a - min_a >= 360.0 {
-            return geometry;
-        }
-
-        let cx = geometry.origin.x + geometry.size.width / 2.0;
-        let cy = geometry.origin.y + geometry.size.height / 2.0;
-        let stroke_w = self.stroke_width().get() / 2.0;
-        let rx = num_traits::Float::max(geometry.size.width - stroke_w * 2.0, 0.0) / 2.0;
-        let ry = num_traits::Float::max(geometry.size.height - stroke_w * 2.0, 0.0) / 2.0;
-        
-        let mut min_x = f32::MAX;
-        let mut max_x = f32::MIN;
-        let mut min_y = f32::MAX;
-        let mut max_y = f32::MIN;
-        
-        let mut add_point = |angle_deg: f32| {
-            let rad = angle_deg * 0.01745329251;
-            let px = cx + rx * num_traits::Float::cos(rad);
-            let py = cy + ry * num_traits::Float::sin(rad);
-            if px < min_x { min_x = px; }
-            if px > max_x { max_x = px; }
-            if py < min_y { min_y = py; }
-            if py > max_y { max_y = py; }
-        };
-
-        add_point(min_a);
-        add_point(max_a);
-
-        let first_quadrant = num_traits::Float::floor(min_a / 90.0) as i32;
-        let last_quadrant = num_traits::Float::ceil(max_a / 90.0) as i32;
-        for q in first_quadrant..=last_quadrant {
-            let q_angle = (q as f32) * 90.0;
-            if q_angle >= min_a && q_angle <= max_a {
-                add_point(q_angle);
-            }
-        }
-        
-        let expansion = stroke_w + 1.0;
-        min_x -= expansion;
-        max_x += expansion;
-        min_y -= expansion;
-        max_y += expansion;
-
-        let orig_min_x = geometry.origin.x - stroke_w;
-        let orig_max_x = geometry.origin.x + geometry.size.width + stroke_w;
-        let orig_min_y = geometry.origin.y - stroke_w;
-        let orig_max_y = geometry.origin.y + geometry.size.height + stroke_w;
-
-        min_x = num_traits::Float::min(num_traits::Float::max(min_x, orig_min_x), orig_max_x);
-        max_x = num_traits::Float::min(num_traits::Float::max(max_x, orig_min_x), orig_max_x);
-        min_y = num_traits::Float::min(num_traits::Float::max(min_y, orig_min_y), orig_max_y);
-        max_y = num_traits::Float::min(num_traits::Float::max(max_y, orig_min_y), orig_max_y);
-        
-        crate::lengths::LogicalRect::new(
-            crate::lengths::LogicalPoint::new(min_x, min_y),
-            crate::lengths::LogicalSize::new(max_x - min_x, max_y - min_y),
-        )
+        arc_bounding_rect_for_angles(geometry, self.stroke_width().get() / 2.0, min_a, max_a)
     }
 
     fn clips_children(self: core::pin::Pin<&Self>) -> bool {
         false
     }
+}
+
+/// Compute the tight bounding rect for an arbitrary angle range within `geometry`.
+///
+/// This is the building block for [`ArcSegment::bounding_rect`] and for the partial
+/// renderer's delta-dirty optimisation: instead of dirtying the full arc bbox on every
+/// angle update, only the wedge swept between the old and new endpoint is dirtied.
+///
+/// `stroke_half_width` – half the stroke width (used for the pixel-level expansion).
+/// `a_min_deg` / `a_max_deg` – inclusive angular range in degrees (0° = 3 o'clock, CW).
+pub fn arc_bounding_rect_for_angles(
+    geometry: LogicalRect,
+    stroke_half_width: f32,
+    a_min_deg: f32,
+    a_max_deg: f32,
+) -> LogicalRect {
+    use num_traits::Float;
+    if a_max_deg <= a_min_deg {
+        return LogicalRect::default();
+    }
+    if a_max_deg - a_min_deg >= 360.0 {
+        return geometry;
+    }
+
+    let cx = geometry.origin.x + geometry.size.width / 2.0;
+    let cy = geometry.origin.y + geometry.size.height / 2.0;
+    let rx = Float::max(geometry.size.width - stroke_half_width * 2.0, 0.0) / 2.0;
+    let ry = Float::max(geometry.size.height - stroke_half_width * 2.0, 0.0) / 2.0;
+
+    let mut min_x = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+
+    let mut add_point = |angle_deg: f32| {
+        let rad = angle_deg * 0.017_453_292_5;
+        let px = cx + rx * Float::cos(rad);
+        let py = cy + ry * Float::sin(rad);
+        if px < min_x { min_x = px; }
+        if px > max_x { max_x = px; }
+        if py < min_y { min_y = py; }
+        if py > max_y { max_y = py; }
+    };
+
+    add_point(a_min_deg);
+    add_point(a_max_deg);
+
+    let first_q = Float::floor(a_min_deg / 90.0) as i32;
+    let last_q  = Float::ceil(a_max_deg / 90.0) as i32;
+    for q in first_q..=last_q {
+        let q_angle = (q as f32) * 90.0;
+        if q_angle >= a_min_deg && q_angle <= a_max_deg {
+            add_point(q_angle);
+        }
+    }
+
+    let expansion = stroke_half_width + 1.0;
+    min_x -= expansion;
+    max_x += expansion;
+    min_y -= expansion;
+    max_y += expansion;
+
+    let orig_min_x = geometry.origin.x - stroke_half_width;
+    let orig_max_x = geometry.origin.x + geometry.size.width + stroke_half_width;
+    let orig_min_y = geometry.origin.y - stroke_half_width;
+    let orig_max_y = geometry.origin.y + geometry.size.height + stroke_half_width;
+
+    min_x = Float::min(Float::max(min_x, orig_min_x), orig_max_x);
+    max_x = Float::min(Float::max(max_x, orig_min_x), orig_max_x);
+    min_y = Float::min(Float::max(min_y, orig_min_y), orig_max_y);
+    max_y = Float::min(Float::max(max_y, orig_min_y), orig_max_y);
+
+    crate::lengths::LogicalRect::new(
+        crate::lengths::LogicalPoint::new(min_x, min_y),
+        crate::lengths::LogicalSize::new(max_x - min_x, max_y - min_y),
+    )
 }
 
 impl RenderArc for ArcSegment {
