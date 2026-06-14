@@ -3180,8 +3180,9 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
 
         let physical_stroke_width = (stroke_width.cast() * self.scale_factor).cast::<i16>();
 
-        let start_angle = arc.start_angle();
-        let end_angle = arc.end_angle();
+        let rotation_angle = self.rotation.orientation.angle();
+        let start_angle = arc.start_angle() + rotation_angle;
+        let end_angle = arc.end_angle() + rotation_angle;
         let start_rad = start_angle.to_radians();
         let end_rad = end_angle.to_radians();
         let start_sin = start_rad.sin();
