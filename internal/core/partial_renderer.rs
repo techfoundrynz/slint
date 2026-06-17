@@ -167,6 +167,8 @@ struct ArcAngles {
     end_angle: f32,
     item_geometry: LogicalRect,
     stroke_half_width: f32,
+    brush: crate::graphics::Brush,
+    line_cap: crate::items::LineCap,
 }
 
 struct PartialRenderingCachedData {
@@ -499,12 +501,18 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                     end_angle: cur_end,
                                     item_geometry,
                                     stroke_half_width: shw,
+                                    brush: arc.stroke(),
+                                    line_cap: arc.stroke_line_cap(),
                                 });
 
                                 // Fall back to full bounding box dirtying if this is the first render to this buffer,
-                                // or if geometry/stroke width changed.
+                                // or if geometry/stroke width/brush/cap changed.
                                 let Some(old) = old_angles else { break 'arc_dirty; };
-                                if old.item_geometry != item_geometry || old.stroke_half_width != shw {
+                                if old.item_geometry != item_geometry
+                                    || old.stroke_half_width != shw
+                                    || old.brush != arc.stroke()
+                                    || old.line_cap != arc.stroke_line_cap()
+                                {
                                     break 'arc_dirty;
                                 }
 
@@ -562,6 +570,70 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                         );
 
                         if rendering_dirty {
+                            #[cfg(feature = "path")]
+                            'arc_dirty: {
+                                let Some(arc) = ItemRef::downcast_pin::<ArcSegment>(item)
+                                    else { break 'arc_dirty; };
+                                let item_geometry = item_rc.geometry();
+                                let shw = arc.stroke_width().get() / 2.0;
+                                let cur_start = arc.start_angle();
+                                let cur_end = arc.end_angle();
+                                let buf_idx = self.buffer_index;
+
+                                let old_angles = entry.arc_angles[buf_idx].clone();
+                                entry.arc_angles[buf_idx] = Some(ArcAngles {
+                                    start_angle: cur_start,
+                                    end_angle: cur_end,
+                                    item_geometry,
+                                    stroke_half_width: shw,
+                                    brush: arc.stroke(),
+                                    line_cap: arc.stroke_line_cap(),
+                                });
+
+                                // Fall back to full bounding box dirtying if this is the first render to this buffer,
+                                // or if geometry/stroke width/brush/cap changed.
+                                let Some(old) = old_angles else { break 'arc_dirty; };
+                                if old.item_geometry != item_geometry
+                                    || old.stroke_half_width != shw
+                                    || old.brush != arc.stroke()
+                                    || old.line_cap != arc.stroke_line_cap()
+                                {
+                                    break 'arc_dirty;
+                                }
+
+                                // Mark the delta start angle change as dirty
+                                if (old.start_angle - cur_start).abs() > 0.01 {
+                                    let lo = f32::min(old.start_angle, cur_start);
+                                    let hi = f32::max(old.start_angle, cur_start);
+                                    mark_arc_dirty_segments(
+                                        self,
+                                        item_geometry,
+                                        shw,
+                                        lo,
+                                        hi,
+                                        state.transform_to_screen,
+                                        &state.clipped,
+                                    );
+                                }
+
+                                // Mark the delta end angle change as dirty
+                                if (old.end_angle - cur_end).abs() > 0.01 {
+                                    let lo = f32::min(old.end_angle, cur_end);
+                                    let hi = f32::max(old.end_angle, cur_end);
+                                    mark_arc_dirty_segments(
+                                        self,
+                                        item_geometry,
+                                        shw,
+                                        lo,
+                                        hi,
+                                        state.transform_to_screen,
+                                        &state.clipped,
+                                    );
+                                }
+
+                                return ItemVisitorResult::Continue(new_state);
+                            }
+
                             self.mark_dirty_rect(
                                 entry.data.bounding_rect(),
                                 state.transform_to_screen,
@@ -624,6 +696,8 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                 end_angle: arc.end_angle(),
                                 item_geometry: item_rc.geometry(),
                                 stroke_half_width: arc.stroke_width().get() / 2.0,
+                                brush: arc.stroke(),
+                                line_cap: arc.stroke_line_cap(),
                             });
                         }
 

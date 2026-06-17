@@ -210,26 +210,38 @@ pub(super) fn draw_texture_line(
                 if color.alpha() == 0 {
                     for pix in line_buffer {
                         let pos = pos(4).0;
-                        let alpha = ((data[pos + 3] as u16 * alpha as u16) / 255) as u8;
-                        let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
-                            alpha,
-                            data[pos + 0],
-                            data[pos + 1],
-                            data[pos + 2],
-                        ));
-                        pix.blend(c);
+                        let a = ((data[pos + 3] as u16 * alpha as u16) / 255) as u8;
+                        if a > 0 {
+                            let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
+                                a,
+                                data[pos + 0],
+                                data[pos + 1],
+                                data[pos + 2],
+                            ));
+                            if a == 255 {
+                                *pix = TargetPixel::from_rgb(c.red, c.green, c.blue);
+                            } else {
+                                pix.blend(c);
+                            }
+                        }
                     }
                 } else {
                     for pix in line_buffer {
                         let pos = pos(4).0;
-                        let alpha = ((data[pos + 3] as u16 * alpha as u16) / 255) as u8;
-                        let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
-                            alpha,
-                            color.red(),
-                            color.green(),
-                            color.blue(),
-                        ));
-                        pix.blend(c);
+                        let a = ((data[pos + 3] as u16 * alpha as u16) / 255) as u8;
+                        if a > 0 {
+                            let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
+                                a,
+                                color.red(),
+                                color.green(),
+                                color.blue(),
+                            ));
+                            if a == 255 {
+                                *pix = TargetPixel::from_rgb(c.red, c.green, c.blue);
+                            } else {
+                                pix.blend(c);
+                            }
+                        }
                     }
                 }
             }
@@ -237,35 +249,56 @@ pub(super) fn draw_texture_line(
                 if color.alpha() > 0 {
                     for pix in line_buffer {
                         let pos = pos(4).0;
-                        let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
-                            ((data[pos + 3] as u16 * alpha as u16) / 255) as u8,
-                            color.red(),
-                            color.green(),
-                            color.blue(),
-                        ));
-                        pix.blend(c);
+                        let a = ((data[pos + 3] as u16 * alpha as u16) / 255) as u8;
+                        if a > 0 {
+                            let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
+                                a,
+                                color.red(),
+                                color.green(),
+                                color.blue(),
+                            ));
+                            if a == 255 {
+                                *pix = TargetPixel::from_rgb(c.red, c.green, c.blue);
+                            } else {
+                                pix.blend(c);
+                            }
+                        }
                     }
                 } else if alpha == 0xff {
                     for pix in line_buffer {
                         let pos = pos(4).0;
-                        let c = PremultipliedRgbaColor {
-                            alpha: data[pos + 3],
-                            red: data[pos + 0],
-                            green: data[pos + 1],
-                            blue: data[pos + 2],
-                        };
-                        pix.blend(c);
+                        let a = data[pos + 3];
+                        if a > 0 {
+                            let c = PremultipliedRgbaColor {
+                                alpha: a,
+                                red: data[pos + 0],
+                                green: data[pos + 1],
+                                blue: data[pos + 2],
+                            };
+                            if a == 255 {
+                                *pix = TargetPixel::from_rgb(c.red, c.green, c.blue);
+                            } else {
+                                pix.blend(c);
+                            }
+                        }
                     }
                 } else {
                     for pix in line_buffer {
                         let pos = pos(4).0;
-                        let c = PremultipliedRgbaColor {
-                            alpha: (data[pos + 3] as u16 * alpha as u16 / 255) as u8,
-                            red: (data[pos + 0] as u16 * alpha as u16 / 255) as u8,
-                            green: (data[pos + 1] as u16 * alpha as u16 / 255) as u8,
-                            blue: (data[pos + 2] as u16 * alpha as u16 / 255) as u8,
-                        };
-                        pix.blend(c);
+                        let a = (data[pos + 3] as u16 * alpha as u16 / 255) as u8;
+                        if a > 0 {
+                            let c = PremultipliedRgbaColor {
+                                alpha: a,
+                                red: (data[pos + 0] as u16 * alpha as u16 / 255) as u8,
+                                green: (data[pos + 1] as u16 * alpha as u16 / 255) as u8,
+                                blue: (data[pos + 2] as u16 * alpha as u16 / 255) as u8,
+                            };
+                            if a == 255 {
+                                *pix = TargetPixel::from_rgb(c.red, c.green, c.blue);
+                            } else {
+                                pix.blend(c);
+                            }
+                        }
                     }
                 }
             }
@@ -1228,8 +1261,13 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
     let mut ranges = [(0usize, 0usize); 2];
     let mut num_ranges = 0;
     let dx_in_sq = params.r_in_sq - dy_sq;
-    if dx_in_sq > 0.0 {
-        let dx_in = dx_in_sq.sqrt();
+    let dx_in = if dx_in_sq > 0.0 {
+        dx_in_sq.sqrt()
+    } else {
+        0.0
+    };
+
+    if dx_in > 0.0 {
         let skip_x_start = (params.x_center - 0.5 - dx_in).floor() as i16 + 1;
         let skip_x_end = (params.x_center - 0.5 + dx_in).ceil() as i16 - 1;
 
@@ -1267,16 +1305,24 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
     // Pre-calculate solid ranges for the scanline
     let mut solid_ranges = [None; 2];
     let mut num_solid_ranges = 0;
-    if r_out_solid_sq >= dy_sq {
-        let dx_out_solid_sq = r_out_solid_sq - dy_sq;
-        let dx_out_solid = dx_out_solid_sq.sqrt();
+
+    let (dx_out_solid, dx_in_solid) = if DISABLE_AA {
+        (dx_max, dx_in)
+    } else {
+        let dx_out_solid = if r_out_solid_sq >= dy_sq {
+            (r_out_solid_sq - dy_sq).sqrt()
+        } else {
+            -1.0
+        };
         let dx_in_solid = if r_in_solid_sq > dy_sq {
-            let dx_in_solid_sq = r_in_solid_sq - dy_sq;
-            dx_in_solid_sq.sqrt()
+            (r_in_solid_sq - dy_sq).sqrt()
         } else {
             0.0
         };
-        
+        (dx_out_solid, dx_in_solid)
+    };
+
+    if dx_out_solid >= 0.0 {
         if dx_in_solid > 0.0 {
             let left_min = (params.x_center - 0.5 - dx_out_solid).ceil() as i16;
             let left_max = (params.x_center - 0.5 - dx_in_solid).floor() as i16;
@@ -1570,78 +1616,102 @@ pub(super) fn draw_arc_line<Pixel: TargetPixel>(
                     continue;
                 }
 
-                let dist_to_shape = if is_inside {
-                    let d_out = (dist_sq - params.r_outer_sq) * params.inv_2_r_outer;
-                    let d_in = (params.r_inner_sq - dist_sq) * params.inv_2_r_inner;
-                    d_out.max(d_in)
-                } else {
-                    match arc.stroke_line_cap {
-                        i_slint_core::items::LineCap::Round => {
-                            let dist_sq_start = (local_dx - params.cap_start_x) * (local_dx - params.cap_start_x) + dy_minus_cap_start_y_sq;
-                            let dist_sq_end = (local_dx - params.cap_end_x) * (local_dx - params.cap_end_x) + dy_minus_cap_end_y_sq;
-                            
-                            let (dist_to_start_cap, dist_to_end_cap) = if DISABLE_AA {
-                                (
-                                    if dist_sq_start <= params.r_cap_sq { -1.0 } else { 1.0 },
-                                    if dist_sq_end <= params.r_cap_sq { -1.0 } else { 1.0 }
-                                )
-                            } else {
-                                (
-                                    if dist_sq_start > params.cap_r_out_sq {
-                                        1.0
-                                    } else if dist_sq_start <= params.cap_r_in_sq {
-                                        -1.0
-                                    } else {
-                                        (dist_sq_start - params.r_cap_sq) * params.inv_2_r_cap
-                                    },
-                                    if dist_sq_end > params.cap_r_out_sq {
-                                        1.0
-                                    } else if dist_sq_end <= params.cap_r_in_sq {
-                                        -1.0
-                                    } else {
-                                        (dist_sq_end - params.r_cap_sq) * params.inv_2_r_cap
-                                    }
-                                )
-                            };
-                            dist_to_start_cap.min(dist_to_end_cap)
-                        }
-                        i_slint_core::items::LineCap::Square => {
-                            let p_dot_vs = local_dx * params.start_cos + vs_dot_y;
-                            let p_dot_ve = local_dx * params.end_cos + ve_dot_y;
+                if DISABLE_AA {
+                    if !is_inside {
+                        // Check if we are inside the cap
+                        let in_cap = match arc.stroke_line_cap {
+                            i_slint_core::items::LineCap::Round => {
+                                let dist_sq_start = (local_dx - params.cap_start_x) * (local_dx - params.cap_start_x) + dy_minus_cap_start_y_sq;
+                                let dist_sq_end = (local_dx - params.cap_end_x) * (local_dx - params.cap_end_x) + dy_minus_cap_end_y_sq;
+                                dist_sq_start <= params.r_cap_sq || dist_sq_end <= params.r_cap_sq
+                            }
+                            i_slint_core::items::LineCap::Square => {
+                                let p_dot_vs = local_dx * params.start_cos + vs_dot_y;
+                                let p_dot_ve = local_dx * params.end_cos + ve_dot_y;
 
-                            let dist_to_ray_unsigned = if p_dot_vs > p_dot_ve {
-                                local_p_cross_vs.abs()
-                            } else {
-                                local_p_cross_ve.abs()
-                            };
-                            let dist_to_ray = dist_to_ray_unsigned - params.stroke_width / 2.0;
+                                let dist_to_ray_unsigned = if p_dot_vs > p_dot_ve {
+                                    local_p_cross_vs.abs()
+                                } else {
+                                    local_p_cross_ve.abs()
+                                };
+                                let dist_to_ray = dist_to_ray_unsigned - params.stroke_width / 2.0;
 
-                            let p_dot = if p_dot_vs > p_dot_ve { p_dot_vs } else { p_dot_ve };
-                            let dist_along_ray = p_dot;
+                                let p_dot = if p_dot_vs > p_dot_ve { p_dot_vs } else { p_dot_ve };
+                                let dist_along_ray = p_dot;
 
-                            let d = dist_to_ray.max(dist_along_ray);
-                            if DISABLE_AA {
-                                if d <= 0.0 { -1.0 } else { 1.0 }
+                                let d = dist_to_ray.max(dist_along_ray);
+                                d <= 0.0
+                            }
+                            _ => false,
+                        };
+                        if in_cap {
+                            if is_opaque {
+                                line_buffer[idx] = solid_color_pixel;
                             } else {
-                                d
+                                line_buffer[idx].blend(arc.stroke_color);
                             }
                         }
-                        _ => 1.0,
                     }
-                };
+                } else {
+                    let dist_to_shape = if is_inside {
+                        let d_out = (dist_sq - params.r_outer_sq) * params.inv_2_r_outer;
+                        let d_in = (params.r_inner_sq - dist_sq) * params.inv_2_r_inner;
+                        d_out.max(d_in)
+                    } else {
+                        match arc.stroke_line_cap {
+                            i_slint_core::items::LineCap::Round => {
+                                let dist_sq_start = (local_dx - params.cap_start_x) * (local_dx - params.cap_start_x) + dy_minus_cap_start_y_sq;
+                                let dist_sq_end = (local_dx - params.cap_end_x) * (local_dx - params.cap_end_x) + dy_minus_cap_end_y_sq;
+                                
+                                let dist_to_start_cap = if dist_sq_start > params.cap_r_out_sq {
+                                    1.0
+                                } else if dist_sq_start <= params.cap_r_in_sq {
+                                    -1.0
+                                } else {
+                                    (dist_sq_start - params.r_cap_sq) * params.inv_2_r_cap
+                                };
+                                let dist_to_end_cap = if dist_sq_end > params.cap_r_out_sq {
+                                    1.0
+                                } else if dist_sq_end <= params.cap_r_in_sq {
+                                    -1.0
+                                } else {
+                                    (dist_sq_end - params.r_cap_sq) * params.inv_2_r_cap
+                                };
+                                dist_to_start_cap.min(dist_to_end_cap)
+                            }
+                            i_slint_core::items::LineCap::Square => {
+                                let p_dot_vs = local_dx * params.start_cos + vs_dot_y;
+                                let p_dot_ve = local_dx * params.end_cos + ve_dot_y;
 
-                let dist_to_shape = dist_to_shape.max(-0.5);
-                if dist_to_shape < 0.5 {
-                    let alpha_i32 = (128.0 - dist_to_shape * 256.0) as i32;
-                    let alpha_u8 = alpha_i32.clamp(0, 256) as u32;
-                    if alpha_u8 > 0 {
-                        let c = PremultipliedRgbaColor {
-                            alpha: ((arc.stroke_color.alpha as u32 * alpha_u8) >> 8) as u8,
-                            red: ((arc.stroke_color.red as u32 * alpha_u8) >> 8) as u8,
-                            green: ((arc.stroke_color.green as u32 * alpha_u8) >> 8) as u8,
-                            blue: ((arc.stroke_color.blue as u32 * alpha_u8) >> 8) as u8,
-                        };
-                        line_buffer[idx].blend(c);
+                                let dist_to_ray_unsigned = if p_dot_vs > p_dot_ve {
+                                    local_p_cross_vs.abs()
+                                } else {
+                                    local_p_cross_ve.abs()
+                                };
+                                let dist_to_ray = dist_to_ray_unsigned - params.stroke_width / 2.0;
+
+                                let p_dot = if p_dot_vs > p_dot_ve { p_dot_vs } else { p_dot_ve };
+                                let dist_along_ray = p_dot;
+
+                                dist_to_ray.max(dist_along_ray)
+                            }
+                            _ => 1.0,
+                        }
+                    };
+
+                    let dist_to_shape = dist_to_shape.max(-0.5);
+                    if dist_to_shape < 0.5 {
+                        let alpha_i32 = (128.0 - dist_to_shape * 256.0) as i32;
+                        let alpha_u8 = alpha_i32.clamp(0, 256) as u32;
+                        if alpha_u8 > 0 {
+                            let c = PremultipliedRgbaColor {
+                                alpha: ((arc.stroke_color.alpha as u32 * alpha_u8) >> 8) as u8,
+                                red: ((arc.stroke_color.red as u32 * alpha_u8) >> 8) as u8,
+                                green: ((arc.stroke_color.green as u32 * alpha_u8) >> 8) as u8,
+                                blue: ((arc.stroke_color.blue as u32 * alpha_u8) >> 8) as u8,
+                            };
+                            line_buffer[idx].blend(c);
+                        }
                     }
                 }
 

@@ -435,6 +435,11 @@ impl<'a, T: TargetPixel> target_pixel_buffer::TargetPixelBuffer for TargetPixelS
 ///  2. Using [`render_by_line()`](Self::render()) to render the window line by line. This
 ///     is only useful if the device does not have enough memory to render the whole window
 ///     in one single buffer
+struct CachedPixmapEntry {
+    image: SharedImageBuffer,
+    dependency_tracker: Pin<alloc::boxed::Box<i_slint_core::properties::PropertyTracker>>,
+}
+
 pub struct SoftwareRenderer {
     repaint_buffer_type: Cell<RepaintBufferType>,
     /// This is the area which was dirty on the previous frame.
@@ -449,6 +454,7 @@ pub struct SoftwareRenderer {
     rendering_metrics_collector: Option<Rc<RenderingMetricsCollector>>,
     #[cfg(feature = "systemfonts")]
     text_layout_cache: sharedparley::TextLayoutCache,
+    graphics_cache: RefCell<alloc::collections::BTreeMap<(usize, u32), CachedPixmapEntry>>,
 }
 
 impl Default for SoftwareRenderer {
@@ -463,6 +469,7 @@ impl Default for SoftwareRenderer {
             repaint_buffer_type: Default::default(),
             #[cfg(feature = "systemfonts")]
             text_layout_cache: Default::default(),
+            graphics_cache: Default::default(),
         }
     }
 }
@@ -614,6 +621,7 @@ impl SoftwareRenderer {
             rotation,
             #[cfg(feature = "systemfonts")]
             &self.text_layout_cache,
+            &self.graphics_cache,
         );
         let mut renderer = self.partial_rendering_state.create_partial_renderer(buffer_renderer, self.swap_buffer_index.get());
         let window_adapter = renderer.window_adapter.clone();
@@ -1171,6 +1179,8 @@ impl RendererSealed for SoftwareRenderer {
         #[cfg(feature = "systemfonts")]
         self.text_layout_cache.component_destroyed(_component);
         self.partial_rendering_state.free_graphics_resources(items);
+        let component_ptr = i_slint_core::item_tree::ItemTreeRef::as_ptr(_component).cast().as_ptr() as usize;
+        self.graphics_cache.borrow_mut().retain(|&(comp_ptr, _), _| comp_ptr != component_ptr);
         Ok(())
     }
 
@@ -1443,6 +1453,7 @@ fn prepare_scene(
         software_renderer.rotation.get(),
         #[cfg(feature = "systemfonts")]
         &software_renderer.text_layout_cache,
+        &software_renderer.graphics_cache,
     );
     let mut renderer =
         software_renderer.partial_rendering_state.create_partial_renderer(prepare_scene, software_renderer.swap_buffer_index.get());
@@ -2200,6 +2211,7 @@ struct SceneBuilder<'a, T> {
     rotation: RotationInfo,
     #[cfg(feature = "systemfonts")]
     text_layout_cache: &'a sharedparley::TextLayoutCache,
+    graphics_cache: &'a RefCell<alloc::collections::BTreeMap<(usize, u32), CachedPixmapEntry>>,
 }
 
 impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
@@ -2210,6 +2222,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         processor: T,
         orientation: RenderingRotation,
         #[cfg(feature = "systemfonts")] text_layout_cache: &'a sharedparley::TextLayoutCache,
+        graphics_cache: &'a RefCell<alloc::collections::BTreeMap<(usize, u32), CachedPixmapEntry>>,
     ) -> Self {
         Self {
             processor,
@@ -2227,6 +2240,7 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             rotation: RotationInfo { orientation, screen_size },
             #[cfg(feature = "systemfonts")]
             text_layout_cache,
+            graphics_cache,
         }
     }
 
@@ -3286,40 +3300,78 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
 
     fn draw_cached_pixmap(
         &mut self,
-        _item: &ItemRc,
+        item_rc: &ItemRc,
         update_fn: &dyn Fn(&mut dyn FnMut(u32, u32, &[u8])),
     ) {
-        // FIXME: actually cache the pixmap
-        update_fn(&mut |width, height, data| {
-            let img = SharedImageBuffer::RGBA8Premultiplied(SharedPixelBuffer::clone_from_slice(
-                data, width, height,
-            ));
+        let component = &(**item_rc.item_tree()) as *const _ as usize;
+        let index = item_rc.index();
+        let key = (component, index);
 
-            let physical_clip = (self.current_state.clip.cast() * self.scale_factor).cast();
-            let source_rect = euclid::rect(0, 0, width as _, height as _);
+        let mut cache = self.graphics_cache.borrow_mut();
+        let entry = cache.remove(&key);
+        let (mut tracker, old_image) = match entry {
+            Some(e) => (e.dependency_tracker, Some(e.image)),
+            None => (alloc::boxed::Box::pin(i_slint_core::properties::PropertyTracker::default()), None),
+        };
 
-            if let Some(clipped_src) = source_rect.intersection(&physical_clip) {
-                let offset = self.current_state.offset.cast() * self.scale_factor;
-                let geometry = clipped_src.translate(offset.to_vector().cast()).round_in();
-
-                let t = target_pixel_buffer::DrawTextureArgs {
-                    data: target_pixel_buffer::TextureDataContainer::Shared {
-                        buffer: SharedBufferData::SharedImage(img),
-                        source_rect,
-                    },
-                    colorize: None,
-                    alpha: (self.current_state.alpha * 255.) as u8,
-                    dst_x: offset.x as _,
-                    dst_y: offset.y as _,
-                    dst_width: width as _,
-                    dst_height: height as _,
-                    rotation: self.rotation.orientation,
-                    tiling: None,
-                };
-                self.processor
-                    .process_target_texture(&t, geometry.cast().transformed(self.rotation));
-            }
+        let mut new_image = None;
+        let maybe_new_data = tracker.as_ref().evaluate_if_dirty(|| {
+            let mut img = None;
+            update_fn(&mut |width, height, data| {
+                img = Some(SharedImageBuffer::RGBA8Premultiplied(SharedPixelBuffer::clone_from_slice(
+                    data, width, height,
+                )));
+            });
+            img
         });
+
+        let img = match maybe_new_data {
+            Some(Some(img)) => {
+                new_image = Some(img.clone());
+                img
+            }
+            _ => {
+                if let Some(img) = old_image {
+                    img
+                } else {
+                    return;
+                }
+            }
+        };
+
+        cache.insert(key, CachedPixmapEntry {
+            image: new_image.unwrap_or_else(|| img.clone()),
+            dependency_tracker: tracker,
+        });
+
+        drop(cache);
+
+        let width = img.width();
+        let height = img.height();
+        let physical_clip = (self.current_state.clip.cast() * self.scale_factor).cast();
+        let source_rect = euclid::rect(0, 0, width as _, height as _);
+
+        if let Some(clipped_src) = source_rect.intersection(&physical_clip) {
+            let offset = self.current_state.offset.cast() * self.scale_factor;
+            let geometry = clipped_src.translate(offset.to_vector().cast()).round_in();
+
+            let t = target_pixel_buffer::DrawTextureArgs {
+                data: target_pixel_buffer::TextureDataContainer::Shared {
+                    buffer: SharedBufferData::SharedImage(img),
+                    source_rect,
+                },
+                colorize: None,
+                alpha: (self.current_state.alpha * 255.) as u8,
+                dst_x: offset.x as _,
+                dst_y: offset.y as _,
+                dst_width: width as _,
+                dst_height: height as _,
+                rotation: self.rotation.orientation,
+                tiling: None,
+            };
+            self.processor
+                .process_target_texture(&t, geometry.cast().transformed(self.rotation));
+        }
     }
 
     fn draw_string(&mut self, string: &str, color: Color) {
