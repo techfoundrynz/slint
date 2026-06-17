@@ -1179,7 +1179,7 @@ impl RendererSealed for SoftwareRenderer {
         #[cfg(feature = "systemfonts")]
         self.text_layout_cache.component_destroyed(_component);
         self.partial_rendering_state.free_graphics_resources(items);
-        let component_ptr = i_slint_core::item_tree::ItemTreeRef::as_ptr(_component).cast().as_ptr() as usize;
+        let component_ptr = i_slint_core::item_tree::ItemTreeRef::as_ptr(_component).as_ptr() as usize;
         self.graphics_cache.borrow_mut().retain(|&(comp_ptr, _), _| comp_ptr != component_ptr);
         Ok(())
     }
@@ -3309,7 +3309,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
 
         let mut cache = self.graphics_cache.borrow_mut();
         let entry = cache.remove(&key);
-        let (mut tracker, old_image) = match entry {
+        let (tracker, old_image) = match entry {
             Some(e) => (e.dependency_tracker, Some(e.image)),
             None => (alloc::boxed::Box::pin(i_slint_core::properties::PropertyTracker::default()), None),
         };
