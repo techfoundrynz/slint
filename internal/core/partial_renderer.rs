@@ -249,20 +249,14 @@ impl core::fmt::Debug for DirtyRegion {
 impl DirtyRegion {
     /// The maximum number of rectangles that can be stored in a DirtyRegion
     ///
-    /// Raised from the upstream 3 for MCU screens that update several small, widely
-    /// separated widgets per frame (arc gauges plus their numeric readouts). At 3, a
-    /// handful of tiny scattered rects overflow and get greedily unioned, and a union
-    /// spanning two opposite corners of a round display covers nearly the whole panel -
-    /// turning small partial updates into full-screen repaints.
-    ///
-    /// The cost of raising it: line-range computation walks every rectangle, and a
-    /// scanline crossing more rects yields more separate spans, which a chunked
-    /// line-by-line flusher turns into more (smaller) panel transactions. 8 covers the
-    /// realistic widget count without letting that grow unbounded.
+    /// Raising this was tried (8) and regressed badly with concentric arc gauges: every
+    /// scanline crosses each ring twice, so more slots means more disjoint spans per
+    /// line, which a chunked line-by-line flusher turns into one panel transaction per
+    /// line. Merging into fewer, larger spans is cheaper there.
     ///
     /// Keep PHYSICAL_REGION_MAX_SIZE in software/lib.rs in step - it is the cbindgen
-    /// hardcoded mirror of this value and defines the C++ struct layout.
-    pub const MAX_COUNT: usize = 8;
+    /// mirror of this value and defines the C++ struct layout.
+    pub const MAX_COUNT: usize = 3;
 
     /// An iterator over the part of the region (they can overlap)
     pub fn iter(&self) -> impl Iterator<Item = euclid::Box2D<Coord, LogicalPx>> + '_ {
@@ -404,17 +398,9 @@ fn mark_arc_dirty_segments<T: ItemRenderer + ItemRendererFeatures>(
     let max_angle = f32::max(start_angle, end_angle);
     let sweep = max_angle - min_angle;
 
-    // Split wide arcs so each rectangle hugs the curve, but keep a narrow sweep as a
-    // single rectangle.
-    //
-    // DirtyRegion holds only MAX_COUNT rectangles and greedily unions anything beyond
-    // that, so rectangle count is a scarce resource. Emitting 4 rects for a
-    // fraction-of-a-degree delta buys no tightness - all four are essentially the same
-    // tiny box - while consuming slots that then force genuinely unrelated dirty rects
-    // to be merged into far larger ones. For a gauge updating at telemetry rate the
-    // per-frame delta is well under a degree, so this is the common case.
-    //
-    // Angles are degrees here (see arc_bounding_rect_for_angles).
+    // Split wide arcs so each rect hugs the curve, but keep a narrow sweep as one rect:
+    // DirtyRegion only holds MAX_COUNT rects and unions the overflow, so 4 rects for a
+    // sub-degree delta spends slots without buying tightness. Angles are degrees.
     const MAX_SEGMENTS: usize = 4;
     const DEGREES_PER_SEGMENT: f32 = 45.0;
     let n = if sweep <= DEGREES_PER_SEGMENT {
