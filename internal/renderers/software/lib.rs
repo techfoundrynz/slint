@@ -456,7 +456,78 @@ pub struct SoftwareRenderer {
     rendering_metrics_collector: Option<Rc<RenderingMetricsCollector>>,
     #[cfg(feature = "systemfonts")]
     text_layout_cache: sharedparley::TextLayoutCache,
+    /// Memoises text_size for bitmap fonts. Without systemfonts there is no
+    /// text_layout_cache, so every layout pass re-measured every string glyph by glyph -
+    /// on an MCU that dominated prepare_scene.
+    pixel_text_size_cache: RefCell<PixelTextSizeCache>,
     graphics_cache: RefCell<alloc::collections::BTreeMap<(usize, u32), CachedPixmapEntry>>,
+}
+
+/// Small direct-mapped cache of measured text extents.
+///
+/// Keyed on the string plus everything that can change the result. The string is kept
+/// (a SharedString clone is a refcount bump) and compared on a hash hit, so a collision
+/// costs a miss rather than a wrong size.
+#[derive(Default)]
+struct PixelTextSizeCacheEntry {
+    hash: u64,
+    text: i_slint_core::SharedString,
+    width: f32,
+    height: f32,
+    valid: bool,
+}
+
+const PIXEL_TEXT_SIZE_CACHE_LEN: usize = 32;
+
+struct PixelTextSizeCache {
+    entries: [PixelTextSizeCacheEntry; PIXEL_TEXT_SIZE_CACHE_LEN],
+    hits: u32,
+    misses: u32,
+}
+
+impl Default for PixelTextSizeCache {
+    fn default() -> Self {
+        Self { entries: Default::default(), hits: 0, misses: 0 }
+    }
+}
+
+impl PixelTextSizeCache {
+    fn lookup(&mut self, hash: u64, text: &str) -> Option<(f32, f32)> {
+        let slot = &self.entries[(hash as usize) % PIXEL_TEXT_SIZE_CACHE_LEN];
+        if slot.valid && slot.hash == hash && slot.text.as_str() == text {
+            self.hits += 1;
+            return Some((slot.width, slot.height));
+        }
+        self.misses += 1;
+        None
+    }
+
+    fn store(&mut self, hash: u64, text: &str, width: f32, height: f32) {
+        let slot = &mut self.entries[(hash as usize) % PIXEL_TEXT_SIZE_CACHE_LEN];
+        slot.hash = hash;
+        slot.text = i_slint_core::SharedString::from(text);
+        slot.width = width;
+        slot.height = height;
+        slot.valid = true;
+    }
+}
+
+/// FNV-1a over the string and the parameters that affect the measurement.
+fn pixel_text_size_key(text: &str, pixel_size: f32, weight: i32, family: &str, max_width: f32, wrap: u8) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut feed = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    };
+    feed(text.as_bytes());
+    feed(&pixel_size.to_bits().to_le_bytes());
+    feed(&weight.to_le_bytes());
+    feed(family.as_bytes());
+    feed(&max_width.to_bits().to_le_bytes());
+    feed(&[wrap]);
+    h
 }
 
 impl Default for SoftwareRenderer {
@@ -471,6 +542,7 @@ impl Default for SoftwareRenderer {
             repaint_buffer_type: Default::default(),
             #[cfg(feature = "systemfonts")]
             text_layout_cache: Default::default(),
+            pixel_text_size_cache: Default::default(),
             graphics_cache: Default::default(),
         }
     }
@@ -848,6 +920,22 @@ impl RendererSealed for SoftwareRenderer {
                 i_slint_core::styled_text::get_raw_text(styled_text)
             }
         };
+        // Measuring a bitmap-font string walks it glyph by glyph, and layout re-solves ask
+        // for this on every text in the tree. Memoise it: the same strings recur frame
+        // after frame, since usually only one or two values on screen actually change.
+        let cache_key = pixel_text_size_key(
+            &string,
+            font_request.pixel_size.map(|s| s.get()).unwrap_or(0.0),
+            font_request.weight.unwrap_or(0),
+            font_request.family.as_ref().map(|f| f.as_str()).unwrap_or(""),
+            max_width.map(|w| w.get()).unwrap_or(-1.0) * scale_factor.get(),
+            text_wrap as u8,
+        );
+
+        if let Some((w, h)) = self.pixel_text_size_cache.borrow_mut().lookup(cache_key, &string) {
+            return LogicalSize::new(w, h);
+        }
+
         let (longest_line_width, height) = match &font {
             #[cfg(feature = "systemfonts")]
             fonts::Font::VectorFont(vf) => {
@@ -867,7 +955,10 @@ impl RendererSealed for SoftwareRenderer {
                 )
             }
         };
-        (PhysicalSize::from_lengths(longest_line_width, height).cast() / scale_factor).cast()
+        let size: LogicalSize =
+            (PhysicalSize::from_lengths(longest_line_width, height).cast() / scale_factor).cast();
+        self.pixel_text_size_cache.borrow_mut().store(cache_key, &string, size.width, size.height);
+        size
     }
 
     fn char_size(
