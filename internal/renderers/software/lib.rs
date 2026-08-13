@@ -200,12 +200,15 @@ pub trait LineBufferProvider {
 
 #[cfg(not(cbindgen))]
 const PHYSICAL_REGION_MAX_SIZE: usize = DirtyRegion::MAX_COUNT;
-// cbindgen can't understand associated const correctly, so hardcode the value
+// cbindgen can't understand associated const correctly, so hardcode the value.
+// MUST stay equal to DirtyRegion::MAX_COUNT: this is what cbindgen bakes into the C++
+// PhysicalRegion struct, so a mismatch is a silent ABI break rather than a build error
+// on the C++ side. The asserts below are the only thing catching that.
 #[cfg(cbindgen)]
-pub const PHYSICAL_REGION_MAX_SIZE: usize = 3;
+pub const PHYSICAL_REGION_MAX_SIZE: usize = 8;
 const _: () = {
-    assert!(PHYSICAL_REGION_MAX_SIZE == 3);
-    assert!(DirtyRegion::MAX_COUNT == 3);
+    assert!(PHYSICAL_REGION_MAX_SIZE == 8);
+    assert!(DirtyRegion::MAX_COUNT == 8);
 };
 
 /// Represents a rectangular region on the screen, used for partial rendering.

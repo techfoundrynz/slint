@@ -248,7 +248,21 @@ impl core::fmt::Debug for DirtyRegion {
 
 impl DirtyRegion {
     /// The maximum number of rectangles that can be stored in a DirtyRegion
-    pub const MAX_COUNT: usize = 3;
+    ///
+    /// Raised from the upstream 3 for MCU screens that update several small, widely
+    /// separated widgets per frame (arc gauges plus their numeric readouts). At 3, a
+    /// handful of tiny scattered rects overflow and get greedily unioned, and a union
+    /// spanning two opposite corners of a round display covers nearly the whole panel -
+    /// turning small partial updates into full-screen repaints.
+    ///
+    /// The cost of raising it: line-range computation walks every rectangle, and a
+    /// scanline crossing more rects yields more separate spans, which a chunked
+    /// line-by-line flusher turns into more (smaller) panel transactions. 8 covers the
+    /// realistic widget count without letting that grow unbounded.
+    ///
+    /// Keep PHYSICAL_REGION_MAX_SIZE in software/lib.rs in step - it is the cbindgen
+    /// hardcoded mirror of this value and defines the C++ struct layout.
+    pub const MAX_COUNT: usize = 8;
 
     /// An iterator over the part of the region (they can overlap)
     pub fn iter(&self) -> impl Iterator<Item = euclid::Box2D<Coord, LogicalPx>> + '_ {
@@ -389,11 +403,29 @@ fn mark_arc_dirty_segments<T: ItemRenderer + ItemRendererFeatures>(
     let min_angle = f32::min(start_angle, end_angle);
     let max_angle = f32::max(start_angle, end_angle);
     let sweep = max_angle - min_angle;
-    
-    // Split the arc into 4 segments to ensure the dirty rectangles are tight.
-    const N: usize = 4;
-    let step = sweep / (N as f32);
-    for i in 0..N {
+
+    // Split wide arcs so each rectangle hugs the curve, but keep a narrow sweep as a
+    // single rectangle.
+    //
+    // DirtyRegion holds only MAX_COUNT rectangles and greedily unions anything beyond
+    // that, so rectangle count is a scarce resource. Emitting 4 rects for a
+    // fraction-of-a-degree delta buys no tightness - all four are essentially the same
+    // tiny box - while consuming slots that then force genuinely unrelated dirty rects
+    // to be merged into far larger ones. For a gauge updating at telemetry rate the
+    // per-frame delta is well under a degree, so this is the common case.
+    //
+    // Angles are degrees here (see arc_bounding_rect_for_angles).
+    const MAX_SEGMENTS: usize = 4;
+    const DEGREES_PER_SEGMENT: f32 = 45.0;
+    let n = if sweep <= DEGREES_PER_SEGMENT {
+        1
+    } else {
+        // Integer ceil, avoiding a float ceil() for no_std builds
+        usize::min((sweep / DEGREES_PER_SEGMENT) as usize + 1, MAX_SEGMENTS)
+    };
+
+    let step = sweep / (n as f32);
+    for i in 0..n {
         let lo = min_angle + (i as f32) * step;
         let hi = min_angle + ((i + 1) as f32) * step;
         let rect = crate::items::arc_bounding_rect_for_angles(geometry, stroke_half_width, lo, hi);
