@@ -534,27 +534,38 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                     break 'arc_dirty;
                                 }
 
-                                // Mark the entire old arc as dirty in 4 segments
-                                mark_arc_dirty_segments(
-                                    self,
-                                    old.item_geometry,
-                                    old.stroke_half_width,
-                                    old.start_angle,
-                                    old.end_angle,
-                                    state.old_transform_to_screen,
-                                    &state.clipped,
-                                );
+                                // ArcSegment::bounding_rect is angle-derived, so moving the
+                                // value changes the cached geometry and lands every arc update
+                                // in this branch - the delta branch below is unreachable for a
+                                // moving arc. Marking both whole arcs here covers the entire
+                                // ring, which unions back into a full-screen repaint every
+                                // frame. Only the moved endpoint changed pixels: the element
+                                // box, stroke, brush and cap are all equal (checked above), and
+                                // arc_bounding_rect_for_angles expands by stroke_half_width + 1
+                                // so the round caps are covered.
+                                if (old.start_angle - cur_start).abs() > 0.01 {
+                                    mark_arc_dirty_segments(
+                                        self,
+                                        item_geometry,
+                                        shw,
+                                        f32::min(old.start_angle, cur_start),
+                                        f32::max(old.start_angle, cur_start),
+                                        state.transform_to_screen,
+                                        &state.clipped,
+                                    );
+                                }
 
-                                // Mark the entire new arc as dirty in 4 segments
-                                mark_arc_dirty_segments(
-                                    self,
-                                    item_geometry,
-                                    shw,
-                                    cur_start,
-                                    cur_end,
-                                    state.transform_to_screen,
-                                    &state.clipped,
-                                );
+                                if (old.end_angle - cur_end).abs() > 0.01 {
+                                    mark_arc_dirty_segments(
+                                        self,
+                                        item_geometry,
+                                        shw,
+                                        f32::min(old.end_angle, cur_end),
+                                        f32::max(old.end_angle, cur_end),
+                                        state.transform_to_screen,
+                                        &state.clipped,
+                                    );
+                                }
 
                                 new_state.adjust_transforms_for_child(&new_geom.transform(), &old_geom.transform());
                                 entry.data = new_geom;
