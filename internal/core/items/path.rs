@@ -356,7 +356,17 @@ impl Path {
             return None;
         }
         // Arc coordinates are element-local; a bounding rect is in the parent's space.
-        Some(arc_cells_bounds(pending, geometry.size).translate(geometry.origin.to_vector()))
+        //
+        // Inflated again after the cell rounding because the cells are a grid over the element
+        // and `arc_cells_covering` clamps to it, while the renderer clips the arc only to the
+        // ancestor clip. ArcGauge sets radius + stroke/2 to exactly half the element, so the
+        // ring's outer edge lands on the element edge and the fringe falls outside it - inside
+        // a clamped rect those pixels are unreachable at any grid pitch.
+        Some(
+            arc_cells_bounds(pending, geometry.size)
+                .inflate(ARC_BAND_SLACK, ARC_BAND_SLACK)
+                .translate(geometry.origin.to_vector()),
+        )
     }
 
     fn arc_snapshot_now(self: Pin<&Self>, size: LogicalSize) -> Option<ArcSnapshot> {
