@@ -540,6 +540,12 @@ pub struct ArcCommand {
     pub reflex: bool,
     /// Sweep covers the whole circle, so there is no angular clipping to apply.
     pub full_circle: bool,
+    /// Round caps: a disc of half the stroke width centred on each end of the arc,
+    /// unioned with the ring. Centres are relative to the span origin, like the circle's.
+    pub round_caps: bool,
+    pub cap_radius: PhysicalLength,
+    pub start_cap: (PhysicalLength, PhysicalLength),
+    pub end_cap: (PhysicalLength, PhysicalLength),
 }
 
 #[derive(Debug)]

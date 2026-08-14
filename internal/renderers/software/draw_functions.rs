@@ -389,11 +389,13 @@ pub(super) fn draw_arc_line(
         }
     };
 
-    let mut spans: [(f32, f32); 4] = [(0., 0.); 4];
+    // Up to four from the ring (two runs, each possibly split by a reflex wedge) plus one
+    // per round cap.
+    let mut spans: [(f32, f32); 6] = [(0., 0.); 6];
     let mut span_count = 0usize;
     {
         let mut push = |lo: f32, hi: f32| {
-            if hi > lo && span_count < 4 {
+            if hi > lo && span_count < 6 {
                 spans[span_count] = (lo, hi);
                 span_count += 1;
             }
@@ -423,11 +425,50 @@ pub(super) fn draw_arc_line(
                 }
             }
         }
+
+        // Round caps: a disc at each end of the sweep, which on this row is just another
+        // span from the circle equation. A full circle has no ends.
+        if arc.round_caps && !arc.full_circle {
+            let h = arc.cap_radius.get() as f32;
+            for cap in [arc.start_cap, arc.end_cap] {
+                let ccx = (cap.0.get() - extra_left_clip) as f32;
+                let dyc = dy - (cap.1.get() - arc.center_y.get()) as f32;
+                if dyc > -h && dyc < h {
+                    let half = sqrt(h * h - dyc * dyc);
+                    push(ccx - half, ccx + half);
+                }
+            }
+        }
+    }
+
+    // The spans can now overlap - a cap sits on top of the ring it terminates - so sort
+    // and merge them. Blending the same pixel twice would darken the overlap, and with a
+    // translucent stroke the seam would be plainly visible.
+    for i in 1..span_count {
+        let v = spans[i];
+        let mut j = i;
+        while j > 0 && spans[j - 1].0 > v.0 {
+            spans[j] = spans[j - 1];
+            j -= 1;
+        }
+        spans[j] = v;
+    }
+    let mut merged: [(f32, f32); 6] = [(0., 0.); 6];
+    let mut merged_count = 0usize;
+    for k in 0..span_count {
+        if merged_count > 0 && spans[k].0 <= merged[merged_count - 1].1 {
+            if spans[k].1 > merged[merged_count - 1].1 {
+                merged[merged_count - 1].1 = spans[k].1;
+            }
+        } else {
+            merged[merged_count] = spans[k];
+            merged_count += 1;
+        }
     }
 
     // Emit. Both ends of every span carry fractional coverage, whether that end came from
     // the circle or from a boundary ray; everything between is opaque.
-    for &(x0, x1) in spans.iter().take(span_count) {
+    for &(x0, x1) in merged.iter().take(merged_count) {
         let x0 = x0.max(0.);
         let x1 = x1.min(width as f32);
         if x1 <= x0 {

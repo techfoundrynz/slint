@@ -2431,6 +2431,18 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             )
         };
 
+        // Cap centres sit on the stroke's centre line, at each end of the sweep.
+        let cap_at = |a: f32| {
+            (
+                PhysicalLength::new(
+                    (center_x + radius * num_traits::Float::cos(a) - clipped.origin.x as f32) as i16,
+                ),
+                PhysicalLength::new(
+                    (center_y + radius * num_traits::Float::sin(a) - clipped.origin.y as f32) as i16,
+                ),
+            )
+        };
+
         let arc = ArcCommand {
             center_x: PhysicalLength::new((center_x - clipped.origin.x as f32) as i16),
             center_y: PhysicalLength::new((center_y - clipped.origin.y as f32) as i16),
@@ -2441,6 +2453,10 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             end_dir: unit(end),
             reflex: sweep.abs() > 180.,
             full_circle: sweep.abs() >= 360.,
+            round_caps: path.stroke_line_cap() == i_slint_core::items::LineCap::Round,
+            cap_radius: PhysicalLength::new(half_stroke as i16),
+            start_cap: cap_at(start),
+            end_cap: cap_at(end),
         };
         self.processor.process_arc(clipped, arc);
         true
