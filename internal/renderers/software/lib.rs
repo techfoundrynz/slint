@@ -1494,6 +1494,16 @@ fn render_window_frame_by_line(
                                     extra_right_clip,
                                 );
                             }
+                            SceneCommand::Arc { arc_index } => {
+                                let arc = &scene.vectors.arcs[arc_index as usize];
+                                draw_functions::draw_arc_line(
+                                    &PhysicalRect { origin: span.pos, size: span.size },
+                                    scene.current_line,
+                                    arc,
+                                    range_buffer,
+                                    extra_left_clip,
+                                );
+                            }
                             SceneCommand::ConicGradient { conic_gradient_index } => {
                                 let g =
                                     &scene.vectors.conic_gradients[conic_gradient_index as usize];
@@ -1642,6 +1652,7 @@ trait ProcessScene {
 
     fn process_simple_rectangle(&mut self, geometry: PhysicalRect, color: PremultipliedRgbaColor);
     fn process_rounded_rectangle(&mut self, geometry: PhysicalRect, data: RoundedRectangle);
+    fn process_arc(&mut self, geometry: PhysicalRect, arc: ArcCommand);
     fn process_linear_gradient(&mut self, geometry: PhysicalRect, gradient: LinearGradientCommand);
     fn process_radial_gradient(&mut self, geometry: PhysicalRect, gradient: RadialGradientCommand);
     fn process_conic_gradient(&mut self, geometry: PhysicalRect, gradient: ConicGradientCommand);
@@ -2004,6 +2015,18 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
         });
     }
 
+    fn process_arc(&mut self, geometry: PhysicalRect, arc: ArcCommand) {
+        self.foreach_ranges(&geometry, |line, buffer, extra_left_clip, _extra_right_clip| {
+            draw_functions::draw_arc_line(
+                &geometry,
+                PhysicalLength::new(line),
+                &arc,
+                buffer,
+                extra_left_clip,
+            );
+        });
+    }
+
     fn process_simple_rectangle(&mut self, geometry: PhysicalRect, color: PremultipliedRgbaColor) {
         self.foreach_ranges(&geometry, |_line, buffer, _extra_left_clip, _extra_right_clip| {
             <B::TargetPixel>::blend_slice(buffer, color)
@@ -2242,6 +2265,20 @@ impl ProcessScene for PrepareScene {
         }
     }
 
+    fn process_arc(&mut self, geometry: PhysicalRect, arc: ArcCommand) {
+        let size = geometry.size;
+        if !size.is_empty() {
+            let arc_index = self.vectors.arcs.len() as u16;
+            self.vectors.arcs.push(arc);
+            self.items.push(SceneItem {
+                pos: geometry.origin,
+                size,
+                z: self.items.len() as u16,
+                command: SceneCommand::Arc { arc_index },
+            });
+        }
+    }
+
     fn process_linear_gradient(&mut self, geometry: PhysicalRect, gradient: LinearGradientCommand) {
         let size = geometry.size;
         if !size.is_empty() {
@@ -2329,6 +2366,86 @@ struct SceneBuilder<'a, T> {
 }
 
 impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
+    /// Draw a Path that carries an arc hint as a real arc. Returns false if it cannot be
+    /// handled here, in which case the caller falls back to stroking the path elements.
+    #[cfg(feature = "path")]
+    fn draw_path_as_arc(
+        &mut self,
+        path: Pin<&i_slint_core::items::Path>,
+        geom: &LogicalRect,
+    ) -> bool {
+        // Only a plain stroke is expressible as a ring. A fill, or a rotated screen, goes
+        // through the general path so nothing is silently drawn wrong.
+        if !path.fill().is_transparent() || self.rotation.orientation != RenderingRotation::NoRotation
+        {
+            return false;
+        }
+        let stroke_brush = path.stroke();
+        let stroke_width = path.stroke_width().get();
+        if stroke_brush.is_transparent() || stroke_width <= 0. {
+            // Nothing to draw, but the arc hint was honoured.
+            return true;
+        }
+        let color = self.alpha_color(stroke_brush.color());
+        if color.alpha() == 0 {
+            return true;
+        }
+
+        let scale = self.scale_factor.get();
+        let radius = path.arc_radius().get() * scale;
+        let half_stroke = stroke_width * scale / 2.;
+        let outer = radius + half_stroke;
+        if outer <= 0. {
+            return true;
+        }
+
+        // The ring's bounding box, clipped, becomes the scene item's geometry - the rows
+        // outside it are never visited.
+        let physical_geom_f32 =
+            geom.translate(self.current_state.offset.to_vector()).cast() * self.scale_factor;
+        let origin = physical_geom_f32.round().origin;
+        let center_x = origin.x + path.arc_center_x().get() * scale;
+        let center_y = origin.y + path.arc_center_y().get() * scale;
+        let bounds = PhysicalRect::new(
+            euclid::point2((center_x - outer).floor() as i16, (center_y - outer).floor() as i16),
+            euclid::size2((outer * 2.).ceil() as i16 + 2, (outer * 2.).ceil() as i16 + 2),
+        );
+        let physical_clip = (self.current_state.clip.translate(self.current_state.offset.to_vector())
+            .cast()
+            * self.scale_factor)
+            .round()
+            .cast::<i16>();
+        let Some(clipped) = bounds.intersection(&physical_clip) else {
+            return true;
+        };
+
+        // Slint angles run clockwise from 3 o'clock, which is also the screen's sense
+        // because y grows downward, so the direction vectors need no flip.
+        let start = path.arc_start_angle().to_radians();
+        let sweep = path.arc_sweep_angle();
+        let end = start + sweep.to_radians();
+        let unit = |a: f32| -> (i32, i32) {
+            (
+                (num_traits::Float::cos(a) * 32768.) as i32,
+                (num_traits::Float::sin(a) * 32768.) as i32,
+            )
+        };
+
+        let arc = ArcCommand {
+            center_x: PhysicalLength::new((center_x - clipped.origin.x as f32) as i16),
+            center_y: PhysicalLength::new((center_y - clipped.origin.y as f32) as i16),
+            outer_radius: PhysicalLength::new(outer as i16),
+            inner_radius: PhysicalLength::new((radius - half_stroke).max(0.) as i16),
+            color: color.into(),
+            start_dir: unit(start),
+            end_dir: unit(end),
+            reflex: sweep.abs() > 180.,
+            full_circle: sweep.abs() >= 360.,
+        };
+        self.processor.process_arc(clipped, arc);
+        true
+    }
+
     fn new(
         screen_size: PhysicalSize,
         scale_factor: ScaleFactor,
@@ -3202,6 +3319,13 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
     ) {
         let geom = LogicalRect::from(size);
         if !self.should_draw(&geom) {
+            return;
+        }
+
+        // A path that says it is a circular arc is drawn analytically: no rasterization,
+        // no coverage mask, and only the pixels the ring covers are touched. Falls through
+        // to the general path below when the hint is absent.
+        if path.arc_radius().get() > 0. && self.draw_path_as_arc(path, &geom) {
             return;
         }
 

@@ -50,6 +50,13 @@ pub struct Path {
     pub stroke_line_cap: Property<LineCap>,
     pub stroke_line_join: Property<LineJoin>,
     pub stroke_miter_limit: Property<f32>,
+    /// When `arc_radius` is greater than zero this path is a stroked circular arc, and a
+    /// renderer that can draw one directly may use these instead of stroking `elements`.
+    pub arc_center_x: Property<LogicalLength>,
+    pub arc_center_y: Property<LogicalLength>,
+    pub arc_radius: Property<LogicalLength>,
+    pub arc_start_angle: Property<f32>,
+    pub arc_sweep_angle: Property<f32>,
     pub viewbox_x: Property<f32>,
     pub viewbox_y: Property<f32>,
     pub viewbox_width: Property<f32>,

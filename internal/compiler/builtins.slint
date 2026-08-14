@@ -2410,6 +2410,20 @@ export component Path {
     //!
     //-fake
     in property <string> commands;
+    /// Centre of the arc described by `arc-radius`, in the element's coordinates.
+    in property <length> arc-center-x;
+    in property <length> arc-center-y;
+    /// When greater than zero, this path is a stroked circular arc, and a renderer able to
+    /// draw one directly may do so instead of stroking the path elements. The elements are
+    /// still used by renderers without that support, so a Path should describe the same arc
+    /// both ways. Stating the arc explicitly avoids recovering a centre and angles from the
+    /// endpoints, which is ill conditioned as the sweep approaches a full circle.
+    /// \default 0
+    in property <length> arc-radius;
+    /// Where the arc begins. 0 is at 3 o'clock and the sweep runs clockwise.
+    in property <angle> arc-start-angle;
+    /// How far the arc sweeps from `arc-start-angle`.
+    in property <angle> arc-sweep-angle;
     /// Defines how the path's view box is scaled to fit the element's width and height.
     /// If no view box is defined, the implicit bounding rectangle is used.
     /// \default contain

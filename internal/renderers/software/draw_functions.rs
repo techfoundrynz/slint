@@ -311,6 +311,161 @@ pub(super) fn draw_texture_line(
     }
 }
 
+/// Draw one line of a stroked circular arc into the line buffer.
+///
+/// Coverage comes from the circle equation rather than from a rasterized mask, so the only
+/// pixels touched are the ones the ring passes through. Per row this is two square roots
+/// for the radial edges plus O(1) work for the angular ends; the interior of each span is
+/// a flat `blend_slice`.
+///
+/// The row is built in three stages:
+///   1. radial - `x = sqrt(r^2 - y^2)` for the outer and inner edge gives the row's one or
+///      two runs (two when the row passes through the hole)
+///   2. angular - each boundary ray is a half plane whose edge crosses this row at a single
+///      x, so the wedge reduces to an interval; a reflex sweep is the union of two
+///   3. the intersection of the two, emitted as solid runs with partial pixels at the ends
+pub(super) fn draw_arc_line(
+    span: &PhysicalRect,
+    line: PhysicalLength,
+    arc: &super::ArcCommand,
+    line_buffer: &mut [impl TargetPixel],
+    extra_left_clip: i16,
+) {
+    let width = line_buffer.len() as i32;
+    if width <= 0 || arc.color.alpha == 0 {
+        return;
+    }
+
+    // Centre of this pixel row relative to the circle centre.
+    let dy = (line.get() - span.origin.y_length().get() - arc.center_y.get()) as f32 + 0.5;
+    let outer = arc.outer_radius.get() as f32;
+    let inner = arc.inner_radius.get().max(0) as f32;
+    let dy_abs = if dy < 0. { -dy } else { dy };
+    if dy_abs >= outer {
+        return;
+    }
+
+    let sqrt = |v: f32| -> f32 {
+        if v <= 0. { 0. } else { Float::sqrt(v) }
+    };
+
+    // Half width of the ring at this row. The outer edge always exists here; the inner
+    // edge only when the row passes through the hole.
+    let half_outer = sqrt(outer * outer - dy * dy);
+    let has_hole = dy_abs < inner;
+    let half_inner = if has_hole { sqrt(inner * inner - dy * dy) } else { 0. };
+
+    // Circle centre in line-buffer coordinates. center_x is relative to the span origin,
+    // and the buffer starts extra_left_clip pixels into the span.
+    let cx = (arc.center_x.get() - extra_left_clip) as f32;
+
+    // The row's runs before angular clipping. Without a hole the ring is one run.
+    let mut runs: [(f32, f32); 2] = [(0., 0.); 2];
+    let run_count = if has_hole {
+        runs[0] = (cx - half_outer, cx - half_inner);
+        runs[1] = (cx + half_inner, cx + half_outer);
+        2
+    } else {
+        runs[0] = (cx - half_outer, cx + half_outer);
+        1
+    };
+
+    // Angular clipping. For a boundary ray with unit direction d the wedge side is
+    // cross(d, p) >= 0, which for a fixed row is linear in x and so clips the row to a
+    // half line. A reflex sweep is the union of the two half planes, which can leave a
+    // gap in the middle of the row.
+    let half_plane = |dir: (i32, i32)| -> (f32, f32) {
+        let dx_f = dir.0 as f32 / 32768.0;
+        let dy_f = dir.1 as f32 / 32768.0;
+        // cross(d, p) = d.x * dy - d.y * dx >= 0  =>  dx <= (d.x * dy) / d.y  when d.y > 0
+        if dy_f > 0. {
+            (f32::NEG_INFINITY, cx + (dx_f * dy) / dy_f)
+        } else if dy_f < 0. {
+            (cx + (dx_f * dy) / dy_f, f32::INFINITY)
+        } else if dx_f * dy >= 0. {
+            (f32::NEG_INFINITY, f32::INFINITY)
+        } else {
+            (0., 0.)
+        }
+    };
+
+    let mut spans: [(f32, f32); 4] = [(0., 0.); 4];
+    let mut span_count = 0usize;
+    {
+        let mut push = |lo: f32, hi: f32| {
+            if hi > lo && span_count < 4 {
+                spans[span_count] = (lo, hi);
+                span_count += 1;
+            }
+        };
+        let a = if arc.full_circle { (f32::NEG_INFINITY, f32::INFINITY) } else { half_plane(arc.start_dir) };
+        let b = if arc.full_circle {
+            (f32::NEG_INFINITY, f32::INFINITY)
+        } else {
+            half_plane((-arc.end_dir.0, -arc.end_dir.1))
+        };
+        for run in runs.iter().take(run_count) {
+            if arc.full_circle || !arc.reflex {
+                push(run.0.max(a.0).max(b.0), run.1.min(a.1).min(b.1));
+            } else {
+                // Union of the two half planes, merged when they overlap so no pixel is
+                // blended twice.
+                let mut p0 = (run.0.max(a.0), run.1.min(a.1));
+                let mut p1 = (run.0.max(b.0), run.1.min(b.1));
+                if p0.0 > p1.0 {
+                    core::mem::swap(&mut p0, &mut p1);
+                }
+                if p0.1 > p0.0 && p1.1 > p1.0 && p0.1 >= p1.0 {
+                    push(p0.0, if p0.1 > p1.1 { p0.1 } else { p1.1 });
+                } else {
+                    push(p0.0, p0.1);
+                    push(p1.0, p1.1);
+                }
+            }
+        }
+    }
+
+    // Emit. Both ends of every span carry fractional coverage, whether that end came from
+    // the circle or from a boundary ray; everything between is opaque.
+    for &(x0, x1) in spans.iter().take(span_count) {
+        let x0 = x0.max(0.);
+        let x1 = x1.min(width as f32);
+        if x1 <= x0 {
+            continue;
+        }
+        let first = x0.floor() as i32;
+        let last = ((x1.ceil() as i32) - 1).min(width - 1);
+        if first > last || first < 0 {
+            continue;
+        }
+        if first == last {
+            blend_coverage(&mut line_buffer[first as usize], arc.color, x1 - x0);
+            continue;
+        }
+        blend_coverage(&mut line_buffer[first as usize], arc.color, (first + 1) as f32 - x0);
+        let solid_start = (first + 1) as usize;
+        let solid_end = last as usize;
+        if solid_start < solid_end {
+            TargetPixel::blend_slice(&mut line_buffer[solid_start..solid_end], arc.color);
+        }
+        blend_coverage(&mut line_buffer[last as usize], arc.color, x1 - last as f32);
+    }
+}
+
+#[inline]
+fn blend_coverage(pixel: &mut impl TargetPixel, color: PremultipliedRgbaColor, coverage: f32) {
+    let cov = (coverage.clamp(0., 1.) * 255.) as u32;
+    if cov == 0 {
+        return;
+    }
+    pixel.blend(PremultipliedRgbaColor {
+        alpha: ((color.alpha as u32 * cov) / 255) as u8,
+        red: ((color.red as u32 * cov) / 255) as u8,
+        green: ((color.green as u32 * cov) / 255) as u8,
+        blue: ((color.blue as u32 * cov) / 255) as u8,
+    });
+}
+
 /// draw one line of the rounded rectangle in the line buffer
 #[allow(clippy::unnecessary_cast)] // Coord
 pub(super) fn draw_rounded_rectangle_line(

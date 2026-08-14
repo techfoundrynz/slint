@@ -1,0 +1,87 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+// Arcs drawn from the arc hint rather than by stroking path elements.
+// Covers the cases the scanline code branches on: a full circle (no angular clipping),
+// a sweep under 180 degrees (intersection of two half planes), a reflex sweep (union,
+// which can leave a gap mid-row), and a stroke thin enough that the ring is nearly a line.
+//
+// Each Path also carries the equivalent elements, which is the documented contract: a
+// renderer that cannot draw the arc directly strokes those instead. The software renderer
+// takes that fallback when the screen is rotated, so the rotated renders here are zeno
+// output compared against an analytically drawn reference - hence the loose threshold.
+
+// SIZE=128x128
+// ROTATION_THRESHOLD=255
+
+export component TestCase inherits Window {
+    width: 128px;
+    height: 128px;
+    background: #000000;
+
+    // Full circle. Two half turns, because a single 360 degree arc has coincident
+    // endpoints and no defined centre - the reason the hint exists.
+    Path {
+        width: 100%;
+        height: 100%;
+        fit: preserve;
+        stroke: #ffffff;
+        stroke-width: 6px;
+        arc-center-x: 32px;
+        arc-center-y: 32px;
+        arc-radius: 22px;
+        arc-start-angle: 0deg;
+        arc-sweep-angle: 360deg;
+        MoveTo { x: 51; y: 29; }
+        ArcTo { radius-x: 22; radius-y: 22; x: 7; y: 29; sweep: true; }
+        ArcTo { radius-x: 22; radius-y: 22; x: 51; y: 29; sweep: true; }
+    }
+
+    // Quarter, from 3 o'clock sweeping clockwise to 6 o'clock
+    Path {
+        width: 100%;
+        height: 100%;
+        fit: preserve;
+        stroke: #ff0000;
+        stroke-width: 6px;
+        arc-center-x: 96px;
+        arc-center-y: 32px;
+        arc-radius: 22px;
+        arc-start-angle: 0deg;
+        arc-sweep-angle: 90deg;
+        MoveTo { x: 115; y: 29; }
+        ArcTo { radius-x: 22; radius-y: 22; x: 93; y: 51; sweep: true; }
+    }
+
+    // Reflex sweep
+    Path {
+        width: 100%;
+        height: 100%;
+        fit: preserve;
+        stroke: #00ff00;
+        stroke-width: 6px;
+        arc-center-x: 32px;
+        arc-center-y: 96px;
+        arc-radius: 22px;
+        arc-start-angle: 45deg;
+        arc-sweep-angle: 270deg;
+        MoveTo { x: 44; y: 108; }
+        ArcTo { radius-x: 22; radius-y: 22; x: 44; y: 77; sweep: true; large-arc: true; }
+    }
+
+    // Thin stroke, upper half
+    Path {
+        width: 100%;
+        height: 100%;
+        fit: preserve;
+        stroke: #4080ff;
+        stroke-width: 2px;
+        arc-center-x: 96px;
+        arc-center-y: 96px;
+        arc-radius: 22px;
+        arc-start-angle: 180deg;
+        arc-sweep-angle: 180deg;
+        MoveTo { x: 73; y: 95; }
+        ArcTo { radius-x: 22; radius-y: 22; x: 117; y: 95; sweep: true; }
+    }
+}
