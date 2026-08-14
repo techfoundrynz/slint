@@ -396,6 +396,49 @@ pub(super) fn draw_arc_line(
         }
     };
 
+    // The row a boundary ray passes through, done per pixel.
+    //
+    // Clipping a row to an x interval per ray cannot describe this row. A ray on the
+    // horizontal has no x to solve for - its half plane boundary *is* the row - and a half
+    // turn arc has both rays on it at once, where the intersection of two half planes cannot
+    // express "both tips". Testing each pixel against the wedge directly has neither problem.
+    // It costs one row per ray, so at most two per arc per frame.
+    if !arc.full_circle && dy_abs <= 0.5 {
+        let inside = |dx: f32| {
+            // cross(start, p) >= 0 is at or after the start; cross(p, end) >= 0 is at or
+            // before the end.
+            let after_start = arc.start_dir.0 * dy - arc.start_dir.1 * dx >= 0.;
+            let before_end = dx * arc.end_dir.1 - dy * arc.end_dir.0 >= 0.;
+            if arc.reflex { after_start || before_end } else { after_start && before_end }
+        };
+        let cap_covers = |dx: f32| {
+            if !arc.round_caps {
+                return false;
+            }
+            let h = arc.cap_radius.get() as f32;
+            [arc.start_cap, arc.end_cap].iter().any(|cap| {
+                let cdx = dx - (cap.0.get() - arc.center_x.get()) as f32;
+                let cdy = dy - (cap.1.get() - arc.center_y.get()) as f32;
+                cdx * cdx + cdy * cdy <= h * h
+            })
+        };
+        for run in runs.iter().take(run_count) {
+            let from = run.0.max(0.).floor() as i32;
+            let to = (run.1.min(width as f32).ceil() as i32).min(width);
+            for x in from..to {
+                let px = x as f32 + 0.5;
+                if px < run.0 || px > run.1 {
+                    continue;
+                }
+                let dx = px - cx;
+                if inside(dx) || cap_covers(dx) {
+                    line_buffer[x as usize].blend(arc.color);
+                }
+            }
+        }
+        return;
+    }
+
     // Up to four from the ring (two runs, each possibly split by a reflex wedge) plus one
     // per round cap.
     let mut spans: [(f32, f32); 6] = [(0., 0.); 6];
@@ -1129,6 +1172,35 @@ mod arc_line_tests {
             for g in &groups {
                 assert!(g.0 > C as usize, "row {row}: painted left of centre at {g:?}");
             }
+        }
+    }
+
+    /// The row a boundary ray passes through must still be painted. An arc ending on the
+    /// horizontal has its outermost pixels on that row, and losing it shows as a nick at 3
+    /// or 9 o'clock. Both tips of a half turn arc live on it at once.
+    #[test]
+    fn the_row_a_horizontal_ray_passes_through_is_painted() {
+        // Sweeps that put a ray exactly on the horizontal, from either side.
+        for (start, sweep, expect_left, expect_right) in [
+            (0., 90., false, true),    // starts at 3 o'clock, sweeps down
+            (270., 90., false, true),  // ends at 3 o'clock
+            (180., 90., true, false),  // starts at 9 o'clock
+            (90., 90., true, false),   // ends at 9 o'clock
+            (180., 180., true, true),  // both tips on the row
+            (0., 180., true, true),
+        ] {
+            let a = arc(start, sweep);
+            // The exact horizontal falls between the rows at dy = -0.5 and +0.5, so the tip
+            // legitimately sits on one or the other depending on which way the arc sweeps.
+            // What must not happen is it being missing from both.
+            let mut groups = contiguous_groups(&painted(&a, C - 1));
+            groups.extend(contiguous_groups(&painted(&a, C)));
+            let has_left = groups.iter().any(|g| g.1 < C as usize);
+            let has_right = groups.iter().any(|g| g.0 > C as usize);
+            assert!(
+                has_left == expect_left && has_right == expect_right,
+                "start={start} sweep={sweep}: left={has_left} right={has_right},                  wanted left={expect_left} right={expect_right} (groups {groups:?})"
+            );
         }
     }
 
