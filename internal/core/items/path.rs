@@ -274,11 +274,27 @@ struct ArcSnapshotCell {
 ///
 /// Every fault in the exact version was sub-pixel: extremes lost to rounding, the drawn arc
 /// truncated a pixel away from the region computed for it, anti-aliasing reaching past the
-/// boundary. Rounding out to a cell 155px across cannot lose a pixel at the edge, so the
-/// whole class goes away, at the cost of repainting more than strictly necessary. Cells also
-/// coalesce: two bands landing in one cell become one rect rather than two, which matters
-/// because a DirtyRegion holds only three before merging them into their union.
-const ARC_GRID: usize = 3;
+/// boundary. `ARC_BAND_SLACK` covers that reach directly, so the cells no longer have to be
+/// large enough to hide it and the grid is sized for area instead: a cell is repainted whole,
+/// so a coarse grid costs dirty pixels. Cells also coalesce - two bands landing in one cell
+/// become one rect rather than two, which matters because a DirtyRegion holds only three
+/// before merging them into their union.
+const ARC_GRID: usize = 5;
+
+/// How far outside its exact extremes the renderer can actually paint the arc, in pixels.
+///
+/// The values from `annular_sector_bounds` are exact, but the software renderer truncates
+/// the centre and both radii into i16 when it builds the ArcCommand, which shifts the whole
+/// figure by up to (1,1)px and shortens each radius by up to 1px, and it then anti-aliases
+/// half a pixel past every span end. Round caps are discs on the same truncated centre line.
+/// Those compound to a measured 2.8px on the ring, and 5px at a round cap - whose allowance
+/// here is angular (`atan + 1deg`) and so cannot absorb the cap centre's linear truncation.
+/// Against that the previous 1px was never enough. The deficit only escaped the returned rect
+/// when a band edge fell within ~2px inside a cell boundary, which is why a 155px grid looked
+/// clean and a 93px one did not, and why every single-frame test passed: they use an integer
+/// centre and integer radii, making all of these errors identically zero.
+/// `bounds_cover_what_the_renderer_actually_paints` pins the bound at 5; this keeps 1 spare.
+const ARC_BAND_SLACK: Coord = 6 as Coord;
 const ARC_CELLS_ALL: u32 = (1u32 << (ARC_GRID * ARC_GRID)) - 1;
 
 impl Path {
@@ -460,22 +476,16 @@ fn annular_sector_bounds(
         }
     }
 
-    // Grown by a pixel on every side. The values above are the arc's exact extremes, and
-    // the region is scaled and rounded on its way to the renderer, so an edge landing
-    // mid-pixel rounds inward and drops the outermost row or column. Where the arc runs
-    // parallel to that edge - by the horizontal axes for the left and right edges - x
-    // barely changes with angle, so one lost column takes a wide band of arc with it.
-    // Anti-aliased coverage reaches past the exact extreme for the same reason.
     LogicalRect::new(
         euclid::point2(min_x as Coord, min_y as Coord),
         euclid::size2((max_x - min_x) as Coord, (max_y - min_y) as Coord),
     )
-    .inflate(1 as Coord, 1 as Coord)
+    .inflate(ARC_BAND_SLACK, ARC_BAND_SLACK)
 }
 
 #[cfg(test)]
 mod arc_dirty_tests {
-    use super::annular_sector_bounds;
+    use super::{annular_sector_bounds, ARC_BAND_SLACK};
     use crate::lengths::LogicalSize;
 
     /// Every pixel the swept difference can touch must lie inside the rect we declare
@@ -505,6 +515,76 @@ mod arc_dirty_tests {
                     }
                 }
             }
+        }
+    }
+
+    /// The renderer does not draw the arc the bounds describe: building the ArcCommand
+    /// truncates the centre and both radii into i16, so the figure it paints is displaced and
+    /// undersized relative to the exact geometry, and anti-aliasing then reaches half a pixel
+    /// past every span end. This models that quantisation and asserts the band still contains
+    /// it. The geometry here is deliberately non-integral, taken from the utilization gauge on
+    /// a 466px panel - `bounds_cover_the_swept_difference` above uses an integer centre and
+    /// integer radii, which makes every truncation error identically zero and is why a 1px
+    /// slack survived five test suites while hardware kept leaving bands of arc behind.
+    #[test]
+    fn bounds_cover_what_the_renderer_actually_paints() {
+        // The utilization gauge on a 466px panel, the RSSI arc, and centres whose fractional
+        // part is nearly a whole pixel - truncation is worst there, so a bound that holds for
+        // 0.999 holds for anything.
+        for (cx, cy, radius, stroke) in [
+            (201.93333f32, 201.93333f32, 194.16667f32, 15.533334f32),
+            (233.0f32, 233.0f32, 227.0f32, 12.0f32),
+            (240.999f32, 240.999f32, 228.915f32, 15.83f32),
+            (232.999f32, 240.001f32, 220.5f32, 12.75f32),
+        ] {
+        let half_stroke = stroke / 2.;
+        let (inner, outer) = (radius - half_stroke, radius + half_stroke);
+
+        // What the ArcCommand ends up holding: i16 truncation toward zero throughout.
+        let (cxq, cyq) = (cx.trunc(), cy.trunc());
+        let (innerq, outerq) = ((radius - half_stroke).max(0.).trunc(), outer.trunc());
+        let capq = half_stroke.trunc();
+        // Horizontal anti-aliasing writes one column past each span end.
+        const AA: f32 = 0.5;
+
+        for start in [0.0f32, 45., 90., 133.7, 180., 224.3, 270., 315., 350.] {
+            for span in [0.5f32, 1., 7., 89., 90., 91., 179., 181., 270., 359.] {
+                let band = annular_sector_bounds(cx, cy, inner, outer, start, start + span)
+                    .inflate(ARC_BAND_SLACK, ARC_BAND_SLACK);
+                let contains = |x: f32, y: f32, what: &str| {
+                    assert!(
+                        x >= band.origin.x - 0.01
+                            && x <= band.origin.x + band.size.width + 0.01
+                            && y >= band.origin.y - 0.01
+                            && y <= band.origin.y + band.size.height + 0.01,
+                        "start={start} span={span}: {what} ({x:.3},{y:.3}) outside {band:?}"
+                    );
+                };
+
+                for i in 0..=400 {
+                    let a = (start + span * (i as f32 / 400.)).to_radians();
+                    // The ring as drawn, about the truncated centre and radii.
+                    for rad in [innerq, (innerq + outerq) / 2., outerq] {
+                        contains(cxq + rad * a.cos() - AA, cyq + rad * a.sin(), "ring");
+                        contains(cxq + rad * a.cos() + AA, cyq + rad * a.sin(), "ring");
+                    }
+                }
+
+                // Round caps: discs on the truncated stroke centre line, truncated radius.
+                for a in [start.to_radians(), (start + span).to_radians()] {
+                    let (ccx, ccy) =
+                        ((cx + radius * a.cos()).trunc(), (cy + radius * a.sin()).trunc());
+                    for k in 0..=64 {
+                        let t = (k as f32 / 64.) * core::f32::consts::TAU;
+                        contains(
+                            ccx + (capq + AA) * t.cos(),
+                            ccy + (capq + AA) * t.sin(),
+                            "cap",
+                        );
+                    }
+                }
+            }
+        }
         }
     }
 
