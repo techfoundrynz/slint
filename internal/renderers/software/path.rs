@@ -98,7 +98,13 @@ pub fn rasterize_mask(
     }
 
     let mut mask_buffer = vec![0u8; path_width * path_height];
-    Mask::new(commands)
+
+    // Rasterize through a Scratch rather than Mask::new. Without one, zeno's rasterizer
+    // builds an AdaptiveStorage local, whose inline [Cell; 1024] + [i32; 512] is ~18KB of
+    // stack - more than an MCU render task typically has in total. Scratch redirects that
+    // storage to the heap.
+    let mut scratch = zeno::Scratch::new();
+    Mask::with_scratch(commands, &mut scratch)
         .size(path_width as u32, path_height as u32)
         .style(style)
         .render_into(&mut mask_buffer, None);
