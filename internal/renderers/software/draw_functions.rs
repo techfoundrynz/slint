@@ -1498,6 +1498,22 @@ impl Rgb565BigEndianPixel {
 }
 
 impl TargetPixel for Rgb565BigEndianPixel {
+    /// Same widening as the native-endian case: the fill value is byte-swapped once up
+    /// front, so pairing pixels into 32-bit stores costs nothing extra here.
+    fn blend_slice(slice: &mut [Self], color: PremultipliedRgbaColor) {
+        if color.alpha == u8::MAX {
+            let p = Self::from_rgb(color.red, color.green, color.blue);
+            let (head, mid, tail) = bytemuck::pod_align_to_mut::<Self, u32>(slice);
+            head.fill(p);
+            mid.fill((p.0 as u32) | ((p.0 as u32) << 16));
+            tail.fill(p);
+        } else {
+            for x in slice {
+                Self::blend(x, color);
+            }
+        }
+    }
+
     fn blend(&mut self, color: PremultipliedRgbaColor) {
         // Reuse the canonical native-endian Rgb565Pixel::blend by decoding
         // from BE byte order, blending, and re-encoding. On targets with a

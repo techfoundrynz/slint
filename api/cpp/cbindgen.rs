@@ -1180,9 +1180,10 @@ fn gen_platform(
         .with_include("private/slint_internal.h")
         .with_after_include(
             r"
-namespace slint::platform { struct Rgb565Pixel; }
+namespace slint::platform { struct Rgb565Pixel; struct Rgb565BigEndianPixel; }
 namespace slint::cbindgen_private {
     struct WindowProperties; using slint::platform::Rgb565Pixel;
+    using slint::platform::Rgb565BigEndianPixel;
     using slint::cbindgen_private::types::TexturePixelFormat;
     struct DrawTextureArgs;
     struct DrawRectangleArgs;
