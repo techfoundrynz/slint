@@ -175,12 +175,6 @@ lsp-types = "0.95.0"
 
 [profile.release]
 panic = "abort"
-# The MCU target runs this library from flash through a 32KB instruction cache, so code size
-# is throughput: the renderer's hot loops and the per-item dirty-region walk both thrash it.
-# Fat LTO across one codegen unit shrinks the binary and inlines across crate boundaries,
-# which is worth more here than the build time it costs.
-lto = "fat"
-codegen-units = 1
 
 
 # Always build resvg and its hot-path dependencies with optimizations,
