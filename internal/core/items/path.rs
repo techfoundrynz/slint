@@ -267,7 +267,7 @@ struct ArcSnapshotCell {
     /// the arc changes and cleared when it is drawn, so a region that is computed but never
     /// painted keeps its debt instead of being forgotten - which is how the exact-band
     /// version lost track of what was on screen.
-    pending: core::cell::Cell<u32>,
+    pending: core::cell::Cell<u64>,
 }
 
 /// The element is divided into a 3x3 grid and invalidation is rounded out to whole cells.
@@ -279,7 +279,7 @@ struct ArcSnapshotCell {
 /// so a coarse grid costs dirty pixels. Cells also coalesce - two bands landing in one cell
 /// become one rect rather than two, which matters because a DirtyRegion holds only three
 /// before merging them into their union.
-const ARC_GRID: usize = 5;
+const ARC_GRID: usize = 7;
 
 /// How far outside its exact extremes the renderer can actually paint the arc, in pixels.
 ///
@@ -295,7 +295,7 @@ const ARC_GRID: usize = 5;
 /// centre and integer radii, making all of these errors identically zero.
 /// `bounds_cover_what_the_renderer_actually_paints` pins the bound at 5; this keeps 1 spare.
 const ARC_BAND_SLACK: Coord = 6 as Coord;
-const ARC_CELLS_ALL: u32 = (1u32 << (ARC_GRID * ARC_GRID)) - 1;
+const ARC_CELLS_ALL: u64 = (1u64 << (ARC_GRID * ARC_GRID)) - 1;
 
 impl Path {
     /// The region to invalidate when this Path is dirty, if a narrower one than the whole
@@ -402,7 +402,7 @@ impl Path {
 }
 
 /// Which grid cells a rectangle touches, one bit per cell, row major.
-fn arc_cells_covering(r: &LogicalRect, size: LogicalSize) -> u32 {
+fn arc_cells_covering(r: &LogicalRect, size: LogicalSize) -> u64 {
     let cw = size.width / ARC_GRID as Coord;
     let ch = size.height / ARC_GRID as Coord;
     if cw <= 0 as Coord || ch <= 0 as Coord {
@@ -412,10 +412,10 @@ fn arc_cells_covering(r: &LogicalRect, size: LogicalSize) -> u32 {
     let index = |v: Coord, step: Coord| ((v / step) as i32).clamp(0, last);
     let (c0, c1) = (index(r.min_x(), cw), index(r.max_x(), cw));
     let (r0, r1) = (index(r.min_y(), ch), index(r.max_y(), ch));
-    let mut mask = 0u32;
+    let mut mask = 0u64;
     for row in r0..=r1 {
         for col in c0..=c1 {
-            mask |= 1u32 << (row * ARC_GRID as i32 + col);
+            mask |= 1u64 << (row * ARC_GRID as i32 + col);
         }
     }
     mask
@@ -423,13 +423,13 @@ fn arc_cells_covering(r: &LogicalRect, size: LogicalSize) -> u32 {
 
 /// The rectangle covering every set cell. Their bounding box rather than their exact union,
 /// which keeps this to one rect - a DirtyRegion holds only three before merging anyway.
-fn arc_cells_bounds(mask: u32, size: LogicalSize) -> LogicalRect {
+fn arc_cells_bounds(mask: u64, size: LogicalSize) -> LogicalRect {
     let cw = size.width / ARC_GRID as Coord;
     let ch = size.height / ARC_GRID as Coord;
     let (mut c0, mut c1, mut r0, mut r1) = (ARC_GRID as i32, -1i32, ARC_GRID as i32, -1i32);
     for row in 0..ARC_GRID as i32 {
         for col in 0..ARC_GRID as i32 {
-            if mask & (1u32 << (row * ARC_GRID as i32 + col)) != 0 {
+            if mask & (1u64 << (row * ARC_GRID as i32 + col)) != 0 {
                 c0 = c0.min(col);
                 c1 = c1.max(col);
                 r0 = r0.min(row);
@@ -495,7 +495,7 @@ fn annular_sector_bounds(
 
 #[cfg(test)]
 mod arc_dirty_tests {
-    use super::{annular_sector_bounds, ARC_BAND_SLACK};
+    use super::{annular_sector_bounds, ARC_BAND_SLACK, ARC_GRID};
     use crate::lengths::LogicalSize;
 
     /// Every pixel the swept difference can touch must lie inside the rect we declare
@@ -666,11 +666,21 @@ mod arc_dirty_tests {
         for start in [0.0f32, 45., 140., 200., 300.] {
             let band = annular_sector_bounds(233., 233., 221., 233., start, start + 1.);
             let mask = super::arc_cells_covering(&band, size);
+            // A 1-degree band is small enough to straddle at most one cell boundary per axis,
+            // so it can never need more than a 2x2 block whatever the grid pitch is. Asserting
+            // that rather than a raw cell count keeps this honest when ARC_GRID changes - the
+            // count grows with a finer grid while the area, which is what costs frames, shrinks.
             let count = mask.count_ones();
-            assert!(count <= 2, "start={start}: touched {count} cells, mask {mask:#b}");
+            assert!(count <= 4, "start={start}: touched {count} cells, mask {mask:#b}");
             let r = super::arc_cells_bounds(mask, size);
             let frac = (r.size.width * r.size.height) / (size.width * size.height);
-            assert!(frac <= 0.23, "start={start}: {:.0}% of the element", frac * 100.);
+            let limit = (2.0 / ARC_GRID as f32).powi(2) * 1.02;
+            assert!(
+                frac <= limit,
+                "start={start}: {:.1}% of the element, limit {:.1}%",
+                frac * 100.,
+                limit * 100.
+            );
         }
     }
 
