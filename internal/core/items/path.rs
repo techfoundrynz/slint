@@ -36,6 +36,8 @@ use core::pin::Pin;
 use euclid::Point2D;
 use euclid::num::Zero;
 use i_slint_core_macros::*;
+#[cfg(not(feature = "std"))]
+use num_traits::Float;
 
 /// The implementation of the `Path` element
 #[repr(C)]
@@ -67,6 +69,9 @@ pub struct Path {
     pub cached_rendering_data: CachedRenderingData,
     fitted_path: FittedPathBox,
     tracker: crate::properties::PropertyTracker,
+    /// Last arc geometry a dirty region was computed for, so that a sweep that only grew
+    /// or shrank can invalidate the difference instead of the whole element.
+    arc_snapshot: ArcSnapshotCell,
 }
 
 impl Item for Path {
@@ -143,6 +148,8 @@ impl Item for Path {
             (*backend).combine_clip(size.into(), LogicalBorderRadius::zero());
         }
         (*backend).draw_path(self, self_rc, size);
+        // The arc is now on screen, so it becomes the baseline for the next difference.
+        self.commit_arc_drawn(size);
         if clip {
             (*backend).restore_state();
         }
@@ -222,6 +229,371 @@ impl Path {
     }
     pub fn angle_at(self: Pin<&Self>, self_rc: &ItemRc, t: f32) -> f32 {
         self.sample_at(self_rc, t).map(|(_, tangent)| tangent).unwrap_or_default()
+    }
+}
+
+/// Everything about a stroked arc that affects the pixels it produces. Two snapshots that
+/// differ only in `sweep` describe arcs whose drawn pixels are identical except over the
+/// angles between the two sweeps.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq)]
+struct ArcSnapshot {
+    valid: bool,
+    center_x: f32,
+    center_y: f32,
+    radius: f32,
+    stroke_width: f32,
+    start: f32,
+    sweep: f32,
+    stroke: u32,
+    fill: u32,
+    cap: u32,
+    width: f32,
+    height: f32,
+}
+
+/// The arc geometry as it was last actually drawn to the screen.
+///
+/// Deliberately not updated when a dirty region is computed: a region can be computed and
+/// then never painted, and measuring the next difference from geometry that never reached
+/// the screen skips whatever is still on it. Committed from `render`, which only runs when
+/// the item is really being drawn.
+#[repr(C)]
+#[derive(Default)]
+struct ArcSnapshotCell {
+    /// The geometry the last dirty region was computed from.
+    last: core::cell::Cell<ArcSnapshot>,
+    /// Which cells still owe a repaint, one bit each, row major. Accumulated as
+    /// the arc changes and cleared when it is drawn, so a region that is computed but never
+    /// painted keeps its debt instead of being forgotten - which is how the exact-band
+    /// version lost track of what was on screen.
+    pending: core::cell::Cell<u32>,
+}
+
+/// The element is divided into a 5x5 grid and invalidation is rounded out to whole cells.
+///
+/// Every fault in the exact version was sub-pixel: extremes lost to rounding, the drawn arc
+/// truncated a pixel away from the region computed for it, anti-aliasing reaching past the
+/// boundary. Rounding out to a cell 155px across cannot lose a pixel at the edge, so the
+/// whole class goes away, at the cost of repainting more than strictly necessary. Cells also
+/// coalesce: two bands landing in one cell become one rect rather than two, which matters
+/// because a DirtyRegion holds only three before merging them into their union.
+const ARC_GRID: usize = 5;
+const ARC_CELLS_ALL: u32 = (1u32 << (ARC_GRID * ARC_GRID)) - 1;
+
+impl Path {
+    /// The region to invalidate when this Path is dirty, if a narrower one than the whole
+    /// element can be justified.
+    ///
+    /// Returns `Some(rect)` only when the arc is unchanged apart from its sweep, in which
+    /// case every pixel outside the swept difference is identical to the previous frame.
+    /// Anything else - a colour, a radius, a resize, or the first frame - returns `None`
+    /// and the caller invalidates the full bounding rect. Under-invalidating here leaves
+    /// stale pixels on screen indefinitely, so the comparison is deliberately total.
+    pub fn arc_dirty_rect(self: Pin<&Self>, geometry: LogicalRect) -> Option<LogicalRect> {
+        let Some(now) = self.arc_snapshot_now(geometry.size) else {
+            return None;
+        };
+        let before = self.arc_snapshot.last.replace(now);
+        let mut pending = self.arc_snapshot.pending.get();
+
+        // Only the two ends may differ, and neither by more than half a turn - past that a
+        // band bounds nothing useful, as lv_arc_set_start_angle also decides. Anything else,
+        // including the first frame, owes the whole element.
+        let ends = [
+            (before.start, now.start),
+            (before.start + before.sweep, now.start + now.sweep),
+        ];
+        let attributable = before.valid
+            && ArcSnapshot { start: now.start, sweep: now.sweep, ..before } == now
+            && !ends.iter().any(|(a, b)| (b - a).abs() > 180.);
+
+        if attributable {
+            let half = now.stroke_width / 2.;
+            let radius = now.radius;
+            // A round cap is a disc on the stroke's centre line, reaching past the end by
+            // asin(half / radius); atan of the same ratio bounds it from above.
+            let cap_slack =
+                if radius > 0. { (half / radius).atan().to_degrees() } else { 0. } + 1.;
+            for (a, b) in ends {
+                if a == b {
+                    continue;
+                }
+                let band = annular_sector_bounds(
+                    now.center_x,
+                    now.center_y,
+                    (radius - half).max(0.),
+                    radius + half,
+                    a.min(b) - cap_slack,
+                    a.max(b) + cap_slack,
+                );
+                pending |= arc_cells_covering(&band, geometry.size);
+            }
+        } else {
+            pending = ARC_CELLS_ALL;
+        }
+
+        self.arc_snapshot.pending.set(pending);
+
+        // Nothing attributable moved, so let the caller invalidate the item's own rect.
+        if pending == 0 || pending == ARC_CELLS_ALL {
+            return None;
+        }
+        // Arc coordinates are element-local; a bounding rect is in the parent's space.
+        Some(arc_cells_bounds(pending, geometry.size).translate(geometry.origin.to_vector()))
+    }
+
+    fn arc_snapshot_now(self: Pin<&Self>, size: LogicalSize) -> Option<ArcSnapshot> {
+        let radius = self.arc_radius().get();
+        if radius <= 0. {
+            return None;
+        }
+        Some(ArcSnapshot {
+            valid: true,
+            center_x: self.arc_center_x().get(),
+            center_y: self.arc_center_y().get(),
+            radius,
+            stroke_width: self.stroke_width().get(),
+            start: self.arc_start_angle(),
+            sweep: self.arc_sweep_angle(),
+            stroke: self.stroke().color().as_argb_encoded(),
+            fill: self.fill().color().as_argb_encoded(),
+            cap: self.stroke_line_cap() as u32,
+            width: size.width as f32,
+            height: size.height as f32,
+        })
+    }
+
+    /// Record the geometry as drawn. Called from `render`, so the baseline a later
+    /// difference is measured against is always something that reached the screen.
+    fn commit_arc_drawn(self: Pin<&Self>, size: LogicalSize) {
+        if let Some(now) = self.arc_snapshot_now(size) {
+            self.arc_snapshot.last.set(now);
+            // Drawn, so the cells no longer owe anything.
+            self.arc_snapshot.pending.set(0);
+        }
+    }
+}
+
+/// Which grid cells a rectangle touches, one bit per cell, row major.
+fn arc_cells_covering(r: &LogicalRect, size: LogicalSize) -> u32 {
+    let cw = size.width / ARC_GRID as Coord;
+    let ch = size.height / ARC_GRID as Coord;
+    if cw <= 0 as Coord || ch <= 0 as Coord {
+        return ARC_CELLS_ALL;
+    }
+    let last = ARC_GRID as i32 - 1;
+    let index = |v: Coord, step: Coord| ((v / step) as i32).clamp(0, last);
+    let (c0, c1) = (index(r.min_x(), cw), index(r.max_x(), cw));
+    let (r0, r1) = (index(r.min_y(), ch), index(r.max_y(), ch));
+    let mut mask = 0u32;
+    for row in r0..=r1 {
+        for col in c0..=c1 {
+            mask |= 1u32 << (row * ARC_GRID as i32 + col);
+        }
+    }
+    mask
+}
+
+/// The rectangle covering every set cell. Their bounding box rather than their exact union,
+/// which keeps this to one rect - a DirtyRegion holds only three before merging anyway.
+fn arc_cells_bounds(mask: u32, size: LogicalSize) -> LogicalRect {
+    let cw = size.width / ARC_GRID as Coord;
+    let ch = size.height / ARC_GRID as Coord;
+    let (mut c0, mut c1, mut r0, mut r1) = (ARC_GRID as i32, -1i32, ARC_GRID as i32, -1i32);
+    for row in 0..ARC_GRID as i32 {
+        for col in 0..ARC_GRID as i32 {
+            if mask & (1u32 << (row * ARC_GRID as i32 + col)) != 0 {
+                c0 = c0.min(col);
+                c1 = c1.max(col);
+                r0 = r0.min(row);
+                r1 = r1.max(row);
+            }
+        }
+    }
+    if c1 < 0 {
+        return LogicalRect::default();
+    }
+    LogicalRect::new(
+        euclid::point2(c0 as Coord * cw, r0 as Coord * ch),
+        euclid::size2((c1 - c0 + 1) as Coord * cw, (r1 - r0 + 1) as Coord * ch),
+    )
+}
+
+/// Bounding rectangle of the part of a ring between two angles, in degrees measured
+/// clockwise from 3 o'clock.
+fn annular_sector_bounds(
+    cx: f32,
+    cy: f32,
+    inner: f32,
+    outer: f32,
+    from: f32,
+    to: f32,
+) -> LogicalRect {
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    let mut include = |x: f32, y: f32| {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    };
+
+    // Both ends of the stroke at both radii.
+    for a in [from, to] {
+        let (s, c) = (a.to_radians().sin(), a.to_radians().cos());
+        for r in [inner, outer] {
+            include(cx + r * c, cy + r * s);
+        }
+    }
+    // Plus wherever the outer edge touches an axis inside the range, which is where the
+    // extremes of a wide sector actually are.
+    let span = to - from;
+    for k in 0..=4 {
+        let axis = 90. * k as f32;
+        // Smallest non-negative rotation from `from` to this axis. Written out rather than
+        // with rem_euclid, which is a std-only inherent method on f32.
+        let raw = axis - from;
+        let delta = raw - 360. * (raw / 360.).floor();
+        if delta <= span {
+            let (s, c) = (axis.to_radians().sin(), axis.to_radians().cos());
+            include(cx + outer * c, cy + outer * s);
+        }
+    }
+
+    // Grown by a pixel on every side. The values above are the arc's exact extremes, and
+    // the region is scaled and rounded on its way to the renderer, so an edge landing
+    // mid-pixel rounds inward and drops the outermost row or column. Where the arc runs
+    // parallel to that edge - by the horizontal axes for the left and right edges - x
+    // barely changes with angle, so one lost column takes a wide band of arc with it.
+    // Anti-aliased coverage reaches past the exact extreme for the same reason.
+    LogicalRect::new(
+        euclid::point2(min_x as Coord, min_y as Coord),
+        euclid::size2((max_x - min_x) as Coord, (max_y - min_y) as Coord),
+    )
+    .inflate(1 as Coord, 1 as Coord)
+}
+
+#[cfg(test)]
+mod arc_dirty_tests {
+    use super::annular_sector_bounds;
+    use crate::lengths::LogicalSize;
+
+    /// Every pixel the swept difference can touch must lie inside the rect we declare
+    /// dirty. Anything outside it keeps last frame's pixels, so a gap here shows up as
+    /// arc fragments left behind on screen.
+    #[test]
+    fn bounds_cover_the_swept_difference() {
+        let (cx, cy, inner, outer) = (233.0f32, 233.0f32, 215.0f32, 233.0f32);
+        // Starts chosen to straddle every axis, sweeps from a sliver to most of a turn.
+        for start in [0.0f32, 45., 90., 135., 140., 180., 270., 315., 350.] {
+            for span in [0.5f32, 1., 7., 89., 90., 91., 179., 181., 270., 359.] {
+                let r = annular_sector_bounds(cx, cy, inner, outer, start, start + span)
+                    .inflate(1., 1.);
+                // Sample the sector densely in both angle and radius.
+                for i in 0..=400 {
+                    let a = (start + span * (i as f32 / 400.)).to_radians();
+                    for rad in [inner, (inner + outer) / 2., outer] {
+                        let x = cx + rad * a.cos();
+                        let y = cy + rad * a.sin();
+                        assert!(
+                            x >= r.origin.x - 0.01
+                                && x <= r.origin.x + r.size.width + 0.01
+                                && y >= r.origin.y - 0.01
+                                && y <= r.origin.y + r.size.height + 0.01,
+                            "start={start} span={span}: point ({x:.1},{y:.1}) outside {r:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The region is scaled and rounded before the renderer sees it, so containment has to
+    /// survive that. Rounding the exact extremes drops the outermost row or column, and
+    /// where the arc runs parallel to that edge - by the horizontal axes - one lost column
+    /// removes a wide band of it. This is what the float-tolerance check above missed.
+    #[test]
+    fn bounds_survive_rounding_to_the_pixel_grid() {
+        // A dial the size the firmware draws.
+        let (cx, cy, inner, outer) = (233.0f32, 233.0f32, 221.0f32, 233.0f32);
+        for start in [0.0f32, 90., 170., 176., 180., 184., 266., 350., 356., 4.] {
+            for span in [1.0f32, 2., 5., 30., 90., 179.] {
+                let r = annular_sector_bounds(cx, cy, inner, outer, start, start + span);
+                // As the renderer does: round the edges to whole pixels.
+                let (x0, y0) = (r.origin.x.round(), r.origin.y.round());
+                let (x1, y1) =
+                    ((r.origin.x + r.size.width).round(), (r.origin.y + r.size.height).round());
+                for i in 0..=400 {
+                    let a = (start + span * (i as f32 / 400.)).to_radians();
+                    for rad in [inner, (inner + outer) / 2., outer] {
+                        let (x, y) = (cx + rad * a.cos(), cy + rad * a.sin());
+                        assert!(
+                            x >= x0 && x <= x1 && y >= y0 && y <= y1,
+                            "start={start} span={span}: ({x:.2},{y:.2}) outside rounded \
+                             [{x0}..{x1}, {y0}..{y1}]"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Snapping out to whole cells must never lose the band, whatever the sub-pixel detail
+    /// - that is the entire reason for the grid.
+    #[test]
+    fn cells_cover_the_band_they_are_derived_from() {
+        let size = LogicalSize::new(466., 466.);
+        let (cx, cy, inner, outer) = (233.0f32, 233.0f32, 221.0f32, 233.0f32);
+        for start in [0.0f32, 40., 90., 140., 176., 180., 184., 266., 350., 356.] {
+            for span in [1.0f32, 3., 30., 90., 179.] {
+                let band = annular_sector_bounds(cx, cy, inner, outer, start, start + span);
+                let r = super::arc_cells_bounds(super::arc_cells_covering(&band, size), size);
+                for i in 0..=200 {
+                    let a = (start + span * (i as f32 / 200.)).to_radians();
+                    for rad in [inner, outer] {
+                        let (x, y) = (cx + rad * a.cos(), cy + rad * a.sin());
+                        // Tolerance for the element's own edge, where the cell boundary
+                        // lands on the same coordinate and floating point disagrees in the
+                        // last digit.
+                        assert!(
+                            x >= r.min_x() - 0.01
+                                && x <= r.max_x() + 0.01
+                                && y >= r.min_y() - 0.01
+                                && y <= r.max_y() + 0.01,
+                            "start={start} span={span}: ({x:.1},{y:.1}) outside cells {r:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A one degree change should land in one or two cells, not the whole element, or the
+    /// grid has bought nothing.
+    #[test]
+    fn a_small_change_touches_few_cells() {
+        let size = LogicalSize::new(466., 466.);
+        for start in [0.0f32, 45., 140., 200., 300.] {
+            let band = annular_sector_bounds(233., 233., 221., 233., start, start + 1.);
+            let mask = super::arc_cells_covering(&band, size);
+            let count = mask.count_ones();
+            assert!(count <= 2, "start={start}: touched {count} cells, mask {mask:#b}");
+            let r = super::arc_cells_bounds(mask, size);
+            let frac = (r.size.width * r.size.height) / (size.width * size.height);
+            assert!(frac <= 0.23, "start={start}: {:.0}% of the element", frac * 100.);
+        }
+    }
+
+    /// The point of the exercise: a small sweep change must produce a rect far smaller
+    /// than the element, or nothing has been gained over invalidating the whole thing.
+    #[test]
+    fn small_delta_is_a_small_rect() {
+        let full = 466.0f32 * 466.0;
+        for start in [0.0f32, 140., 300.] {
+            let r = annular_sector_bounds(233., 233., 215., 233., start, start + 1.);
+            let area = r.size.width * r.size.height;
+            assert!(area < full * 0.05, "start={start}: {area} px is not a small delta");
+        }
     }
 }
 

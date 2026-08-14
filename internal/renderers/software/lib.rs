@@ -2424,11 +2424,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         let start = path.arc_start_angle().to_radians();
         let sweep = path.arc_sweep_angle();
         let end = start + sweep.to_radians();
-        let unit = |a: f32| -> (i32, i32) {
-            (
-                (num_traits::Float::cos(a) * 32768.) as i32,
-                (num_traits::Float::sin(a) * 32768.) as i32,
-            )
+        let unit = |a: f32| -> (f32, f32) {
+            (num_traits::Float::cos(a), num_traits::Float::sin(a))
         };
 
         // Cap centres sit on the stroke's centre line, at each end of the sweep.

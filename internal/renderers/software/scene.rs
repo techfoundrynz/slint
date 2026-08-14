@@ -531,10 +531,16 @@ pub struct ArcCommand {
     pub outer_radius: PhysicalLength,
     pub inner_radius: PhysicalLength,
     pub color: PremultipliedRgbaColor,
-    /// Unit vectors along the two boundary rays, in 1.15 fixed point. A point is inside
-    /// the wedge when it is on the inner side of both (or, for a reflex sweep, either).
-    pub start_dir: (i32, i32),
-    pub end_dir: (i32, i32),
+    /// Unit vectors along the two boundary rays. A point is inside the wedge when it is on
+    /// the inner side of both (or, for a reflex sweep, either).
+    ///
+    /// Kept in f32 rather than fixed point on purpose: the row's clip bound divides by the
+    /// ray's y component, so for a near horizontal ray any error in it is amplified by
+    /// 1/y. At a tenth of a degree from horizontal, 1.15 fixed point was enough to move the
+    /// bound by over a hundred pixels, which showed up as the arc failing to draw around 3
+    /// and 9 o'clock.
+    pub start_dir: (f32, f32),
+    pub end_dir: (f32, f32),
     /// Sweep greater than 180 degrees, where the wedge is the union of the two half
     /// planes rather than their intersection.
     pub reflex: bool,

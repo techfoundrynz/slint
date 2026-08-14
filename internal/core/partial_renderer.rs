@@ -420,6 +420,22 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                         let old_geom = cached_geom.clone();
 
                         let geometry_changed = old_geom != new_geom;
+
+                        // Evaluated for every Path on every visit, not just when the
+                        // narrowed region is usable: the call is what advances the arc's
+                        // snapshot, and the snapshot has to keep describing the geometry
+                        // that was last painted or a later difference is measured from the
+                        // wrong baseline.
+                        // Reads the arc's properties, so it must not register them against
+                        // whatever binding is being evaluated - same reason the geometry
+                        // above is fetched with evaluate_no_tracking.
+                        #[cfg(feature = "path")]
+                        let arc_narrowed = crate::properties::evaluate_no_tracking(|| {
+                            ItemRef::downcast_pin::<crate::items::Path>(item)
+                                .and_then(|p| p.arc_dirty_rect(*new_geom.bounding_rect()))
+                        });
+                        #[cfg(not(feature = "path"))]
+                        let arc_narrowed: Option<LogicalRect> = None;
                         if ItemRef::downcast_pin::<Clip>(item).is_some()
                             || ItemRef::downcast_pin::<Opacity>(item).is_some()
                         {
@@ -464,8 +480,16 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                             || new_state.transform_to_screen != new_state.old_transform_to_screen;
 
                         if rendering_dirty {
+                            // An arc whose sweep is all that changed only needs the swept
+                            // difference repainted, not the element it fills. `arc_narrowed`
+                            // was computed above - unconditionally, so that the arc's
+                            // snapshot always describes what was last painted. Deriving a
+                            // difference from a stale snapshot would skip whatever was
+                            // painted in between and leave it on screen.
+                            let narrowed = if moved { None } else { arc_narrowed };
+
                             self.mark_dirty_rect(
-                                cached_geom.bounding_rect(),
+                                narrowed.as_ref().unwrap_or(cached_geom.bounding_rect()),
                                 state.transform_to_screen,
                                 &state.clipped,
                             );

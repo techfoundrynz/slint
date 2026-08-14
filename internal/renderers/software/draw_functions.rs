@@ -374,15 +374,22 @@ pub(super) fn draw_arc_line(
     // cross(d, p) >= 0, which for a fixed row is linear in x and so clips the row to a
     // half line. A reflex sweep is the union of the two half planes, which can leave a
     // gap in the middle of the row.
-    let half_plane = |dir: (i32, i32)| -> (f32, f32) {
-        let dx_f = dir.0 as f32 / 32768.0;
-        let dy_f = dir.1 as f32 / 32768.0;
+    let half_plane = |dir: (f32, f32)| -> (f32, f32) {
+        let (dx_f, dy_f) = dir;
         // cross(d, p) = d.x * dy - d.y * dx >= 0  =>  dx <= (d.x * dy) / d.y  when d.y > 0
         if dy_f > 0. {
             (f32::NEG_INFINITY, cx + (dx_f * dy) / dy_f)
         } else if dy_f < 0. {
             (cx + (dx_f * dy) / dy_f, f32::INFINITY)
         } else if dx_f * dy >= 0. {
+            // A horizontal ray has no x to solve for, so the row is in or out as a whole.
+            // The row it passes through is genuinely ambiguous - its y of zero sits on the
+            // boundary between the rows at dy = +/-0.5 - and excluding it costs the arc's
+            // outermost pixel row, a horizontal nick at 3 or 9 o'clock. Including the whole
+            // row instead admits the far side of the ring, which is worse: a 0..90 sector
+            // smears round to 180. Fixing it needs the row split at the centre per ray, and
+            // a 180 degree arc has both rays degenerate at once, where the intersection of
+            // two half planes cannot express "both tips".
             (f32::NEG_INFINITY, f32::INFINITY)
         } else {
             (0., 0.)
@@ -1032,6 +1039,160 @@ impl PremultipliedRgbaColor {
 }
 
 /// Trait for the pixels in the buffer
+#[cfg(test)]
+mod arc_line_tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use i_slint_core::graphics::Rgb8Pixel;
+
+    // A 466px dial with a 12px stroke, which is what the firmware actually draws. At this
+    // size most rows pass through the ring's hole and split into a left and a right run;
+    // a 22px test arc barely exercises that at all.
+    const C: i16 = 233;
+    const OUTER: i16 = 233;
+    const INNER: i16 = 221;
+    const W: usize = 466;
+
+    fn arc(start_deg: f32, sweep_deg: f32) -> super::super::ArcCommand {
+        let unit = |d: f32| {
+            let r = d.to_radians();
+            (r.cos(), r.sin())
+        };
+        super::super::ArcCommand {
+            center_x: PhysicalLength::new(C),
+            center_y: PhysicalLength::new(C),
+            outer_radius: PhysicalLength::new(OUTER),
+            inner_radius: PhysicalLength::new(INNER),
+            color: PremultipliedRgbaColor { alpha: 255, red: 255, green: 255, blue: 255 },
+            start_dir: unit(start_deg),
+            end_dir: unit(start_deg + sweep_deg),
+            reflex: sweep_deg.abs() > 180.,
+            full_circle: sweep_deg.abs() >= 360.,
+            round_caps: false,
+            cap_radius: PhysicalLength::new((OUTER - INNER) / 2),
+            start_cap: (PhysicalLength::new(0), PhysicalLength::new(0)),
+            end_cap: (PhysicalLength::new(0), PhysicalLength::new(0)),
+        }
+    }
+
+    /// Painted x positions on one row of a full-width buffer.
+    fn painted(a: &super::super::ArcCommand, row: i16) -> Vec<usize> {
+        let span = PhysicalRect::new(euclid::point2(0, 0), euclid::size2(W as i16, W as i16));
+        let mut buf = vec![Rgb8Pixel { r: 0, g: 0, b: 0 }; W];
+        draw_arc_line(&span, PhysicalLength::new(row), a, &mut buf, 0);
+        buf.iter().enumerate().filter(|(_, p)| p.r > 40).map(|(i, _)| i).collect()
+    }
+
+    fn contiguous_groups(xs: &[usize]) -> Vec<(usize, usize)> {
+        let mut out: Vec<(usize, usize)> = vec![];
+        for &x in xs {
+            match out.last_mut() {
+                Some(g) if x == g.1 + 1 => g.1 = x,
+                _ => out.push((x, x)),
+            }
+        }
+        out
+    }
+
+    /// The row through the centre crosses the hole, so a full ring must paint two runs
+    /// there and nothing between them.
+    #[test]
+    fn centre_row_of_a_full_ring_has_two_runs() {
+        let groups = contiguous_groups(&painted(&arc(0., 360.), C));
+        assert_eq!(groups.len(), 2, "expected a left and a right run, got {groups:?}");
+        assert!(groups[0].0 <= 1 && groups[0].1 >= 10, "left run {:?}", groups[0]);
+        assert!(groups[1].1 >= W - 2 && groups[1].0 <= W - 11, "right run {:?}", groups[1]);
+    }
+
+    /// 150..210 degrees is the 8 to 10 o'clock sector: the left run only, on every row
+    /// that passes through the hole.
+    #[test]
+    fn left_sector_paints_only_the_left_run() {
+        let a = arc(150., 60.);
+        for row in [C - 100, C - 20, C, C + 20, C + 100] {
+            let groups = contiguous_groups(&painted(&a, row));
+            assert!(!groups.is_empty(), "row {row}: nothing painted");
+            for g in &groups {
+                assert!(g.1 < C as usize, "row {row}: painted right of centre at {g:?}");
+            }
+        }
+    }
+
+    /// 330..30 degrees is 2 to 4 o'clock: the right run only.
+    #[test]
+    fn right_sector_paints_only_the_right_run() {
+        let a = arc(330., 60.);
+        for row in [C - 100, C - 20, C, C + 20, C + 100] {
+            let groups = contiguous_groups(&painted(&a, row));
+            assert!(!groups.is_empty(), "row {row}: nothing painted");
+            for g in &groups {
+                assert!(g.0 > C as usize, "row {row}: painted left of centre at {g:?}");
+            }
+        }
+    }
+
+    /// Nothing may be painted outside the sector. The tests above only check that rows are
+    /// not skipped, which cannot see over-painting - and a reflex sweep takes the union of
+    /// two half planes, where painting outside the wedge is the natural way to be wrong.
+    /// A dial spanning 140..400 degrees leaves a gap around 6 o'clock, so anything drawn
+    /// there is arc where there is meant to be none.
+    #[test]
+    fn nothing_is_painted_outside_the_sector() {
+        for (start, sweep) in [(140., 260.), (140., 200.), (140., 190.), (150., 60.), (0., 359.)] {
+            let a = arc(start, sweep);
+            let mut bad = vec![];
+            for row in (C - OUTER + 1)..(C + OUTER - 1) {
+                for x in painted(&a, row) {
+                    let dx = x as f32 + 0.5 - C as f32;
+                    let dy = row as f32 + 0.5 - C as f32;
+                    let r = (dx * dx + dy * dy).sqrt();
+                    // Ignore the anti-aliased fringe just outside the ring's radii.
+                    if r < INNER as f32 - 1.5 || r > OUTER as f32 + 1.5 {
+                        continue;
+                    }
+                    let ang = dy.atan2(dx).to_degrees();
+                    // Rotation from the sweep's start, allowing a couple of degrees for
+                    // the caps and anti-aliasing at each end.
+                    let rel = (ang - start).rem_euclid(360.);
+                    if rel > sweep + 3. && rel < 360. - 3. {
+                        bad.push((x, row, rel as i32));
+                    }
+                }
+            }
+            assert!(
+                bad.is_empty(),
+                "start={start} sweep={sweep}: {} px painted outside the sector, e.g. {:?}",
+                bad.len(),
+                &bad[..bad.len().min(6)]
+            );
+        }
+    }
+
+    /// Every row the ring covers must be painted somewhere, for sectors sitting on each
+    /// horizontal axis and for a reflex sweep spanning both.
+    #[test]
+    fn no_row_of_a_sector_is_skipped() {
+        for (start, sweep) in [(150., 60.), (330., 60.), (140., 260.), (140., 200.)] {
+            let a = arc(start, sweep);
+            let mut blank = vec![];
+            for row in (C - OUTER + 1)..(C + OUTER - 1) {
+                // Rows the sector genuinely does not reach are not a failure; only look at
+                // rows where some angle in the sweep has that y.
+                let reaches = (0..=(sweep as i32)).any(|k| {
+                    let ang = (start + k as f32).to_radians();
+                    let y = C as f32 + (INNER as f32 + 6.) * ang.sin();
+                    (y.round() as i16 - row).abs() <= 1
+                });
+                if reaches && painted(&a, row).is_empty() {
+                    blank.push(row);
+                }
+            }
+            assert!(blank.is_empty(), "start={start} sweep={sweep}: unpainted rows {blank:?}");
+        }
+    }
+}
+
 pub trait TargetPixel: Sized + Copy {
     /// Blend a single pixel with a color
     fn blend(&mut self, color: PremultipliedRgbaColor);
