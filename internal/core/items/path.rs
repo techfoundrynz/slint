@@ -270,7 +270,7 @@ struct ArcSnapshotCell {
     pending: core::cell::Cell<u32>,
 }
 
-/// The element is divided into a 5x5 grid and invalidation is rounded out to whole cells.
+/// The element is divided into a 3x3 grid and invalidation is rounded out to whole cells.
 ///
 /// Every fault in the exact version was sub-pixel: extremes lost to rounding, the drawn arc
 /// truncated a pixel away from the region computed for it, anti-aliasing reaching past the
@@ -278,7 +278,7 @@ struct ArcSnapshotCell {
 /// whole class goes away, at the cost of repainting more than strictly necessary. Cells also
 /// coalesce: two bands landing in one cell become one rect rather than two, which matters
 /// because a DirtyRegion holds only three before merging them into their union.
-const ARC_GRID: usize = 5;
+const ARC_GRID: usize = 3;
 const ARC_CELLS_ALL: u32 = (1u32 << (ARC_GRID * ARC_GRID)) - 1;
 
 impl Path {
