@@ -1,0 +1,142 @@
+# Publish prebuilt Slint binaries for the PubRemote firmware.
+#
+# Consumers download these instead of building the Rust core, which removes the esp
+# Rust toolchain and a multi-minute cargo build from every firmware build.
+#
+# Two pieces are published per release:
+#   Slint-cpp-<version>-<rust_target>.tar.gz   the static lib + C++ headers (incl. generated)
+#   slint-compiler-<host>(.exe)                 the .slint -> C++ compiler, host binaries
+#
+# The compiler MUST come from this fork: it carries the glyph-embedding limit that keeps
+# large font sizes inside the flash budget. Upstream's compiler would silently embed the
+# full charset.
+
+name: MCU prebuilt package
+
+on:
+    workflow_dispatch:
+    push:
+        tags:
+            - "mcu-v*"
+
+env:
+    CARGO_INCREMENTAL: "false"
+    CARGO_PROFILE_RELEASE_LTO: "fat"
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+    # Must match the cargo features the firmware's CMakeLists requests. software-renderer-path
+    # is required for Path/ArcTo, which the UI uses for arcs.
+    SLINT_MCU_FEATURES: "-DSLINT_FEATURE_FREESTANDING=ON -DSLINT_FEATURE_RENDERER_SOFTWARE=ON -DSLINT_FEATURE_SOFTWARE_RENDERER_PATH=ON"
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+    library:
+        name: libslint_cpp.a (${{ matrix.rust_target }})
+        runs-on: ubuntu-22.04
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - idf_target: esp32s3
+                      rust_target: xtensa-esp32s3-none-elf
+        steps:
+            - uses: actions/checkout@v6
+            - uses: ./.github/actions/install-linux-dependencies
+            - uses: dtolnay/rust-toolchain@stable
+            - uses: cargo-bins/cargo-binstall@main
+            - name: install espup
+              run: |
+                  cargo binstall --no-confirm espup
+                  espup install
+                  rustup default esp
+            - name: add esp toolchain to PATH
+              run: |
+                  source "$HOME/export-esp.sh"
+                  echo "$PATH" >> "$GITHUB_PATH"
+            - name: prepare licenses
+              working-directory: api/cpp/
+              run: bash -x ../../scripts/prepare_binary_package.sh ${{ runner.workspace }}/cppbuild
+            - name: configure and build
+              uses: lukka/run-cmake@v3.4
+              with:
+                  cmakeListsOrSettingsJson: CMakeListsTxtAdvanced
+                  cmakeListsTxtPath: CMakeLists.txt
+                  # The C compiler is only used so the generated cmake config records a 4-byte
+                  # pointer size; no C is actually compiled here.
+                  cmakeAppendedArgs: >-
+                      -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+                      -DESP_PLATFORM=1 -DIDF_TARGET=${{ matrix.idf_target }}
+                      -DRust_CARGO_TARGET=${{ matrix.rust_target }}
+                      -DCMAKE_C_COMPILER=xtensa-esp-elf-gcc -DCMAKE_AR=xtensa-esp-elf-ar
+                      -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
+                      -DSLINT_LIBRARY_CARGO_FLAGS='-Zbuild-std=core,alloc'
+                      -DSLINT_COMPILER=download
+                      ${{ env.SLINT_MCU_FEATURES }}
+                  buildDirectory: ${{ runner.workspace }}/cppbuild
+                  buildWithCMakeArgs: "--config Release"
+            - name: cpack
+              working-directory: ${{ runner.workspace }}/cppbuild
+              run: cpack -G TGZ
+            - uses: actions/upload-artifact@v7
+              with:
+                  name: slint-cpp-${{ matrix.rust_target }}
+                  path: ${{ runner.workspace }}/cppbuild/Slint-cpp-*.tar.gz
+
+    compiler:
+        name: slint-compiler (${{ matrix.host }})
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: windows-2022
+                      host: windows-x86_64
+                      bin: slint-compiler.exe
+                    - os: ubuntu-22.04
+                      host: linux-x86_64
+                      bin: slint-compiler
+                    - os: macos-14
+                      host: macos-aarch64
+                      bin: slint-compiler
+        steps:
+            - uses: actions/checkout@v6
+            - uses: dtolnay/rust-toolchain@stable
+            - name: build
+              run: cargo build --release --bin slint-compiler
+            - name: stage
+              shell: bash
+              run: |
+                  mkdir -p dist
+                  cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.bin }}"
+            - uses: actions/upload-artifact@v7
+              with:
+                  name: slint-compiler-${{ matrix.host }}
+                  path: dist/${{ matrix.bin }}
+
+    release:
+        name: publish release
+        needs: [library, compiler]
+        runs-on: ubuntu-22.04
+        if: startsWith(github.ref, 'refs/tags/')
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/download-artifact@v7
+              with:
+                  path: artifacts
+            - name: flatten and name the host binaries
+              run: |
+                  mkdir -p release
+                  find artifacts -name "Slint-cpp-*.tar.gz" -exec cp {} release/ \;
+                  for host in windows-x86_64 linux-x86_64 macos-aarch64; do
+                    src=$(find "artifacts/slint-compiler-$host" -type f | head -1)
+                    [ -z "$src" ] && continue
+                    case "$host" in
+                      windows-*) cp "$src" "release/slint-compiler-$host.exe" ;;
+                      *)         cp "$src" "release/slint-compiler-$host" ;;
+                    esac
+                  done
+                  ls -la release
+            - uses: softprops/action-gh-release@v2
+              with:
+                  files: release/*
+                  generate_release_notes: true
