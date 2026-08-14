@@ -1645,13 +1645,15 @@ trait ProcessScene {
     fn process_linear_gradient(&mut self, geometry: PhysicalRect, gradient: LinearGradientCommand);
     fn process_radial_gradient(&mut self, geometry: PhysicalRect, gradient: RadialGradientCommand);
     fn process_conic_gradient(&mut self, geometry: PhysicalRect, gradient: ConicGradientCommand);
+    // The path colors are passed un-premultiplied: the line-by-line processor composites
+    // through the alpha-map texture path, which colorizes with a plain Color.
     #[cfg(feature = "path")]
     fn process_filled_path(
         &mut self,
         path_geometry: PhysicalRect,
         clip_geometry: PhysicalRect,
         commands: alloc::vec::Vec<path::Command>,
-        color: PremultipliedRgbaColor,
+        color: Color,
     );
     #[cfg(feature = "path")]
     fn process_stroked_path(
@@ -1659,7 +1661,7 @@ trait ProcessScene {
         path_geometry: PhysicalRect,
         clip_geometry: PhysicalRect,
         commands: alloc::vec::Vec<path::Command>,
-        color: PremultipliedRgbaColor,
+        color: Color,
         stroke_width: f32,
         stroke_line_cap: i_slint_core::items::LineCap,
         stroke_line_join: i_slint_core::items::LineJoin,
@@ -2050,9 +2052,15 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
         path_geometry: PhysicalRect,
         clip_geometry: PhysicalRect,
         commands: alloc::vec::Vec<path::Command>,
-        color: PremultipliedRgbaColor,
+        color: Color,
     ) {
-        path::render_filled_path(&commands, &path_geometry, &clip_geometry, color, self.buffer);
+        path::render_filled_path(
+            &commands,
+            &path_geometry,
+            &clip_geometry,
+            color.into(),
+            self.buffer,
+        );
     }
 
     #[cfg(feature = "path")]
@@ -2061,7 +2069,7 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
         path_geometry: PhysicalRect,
         clip_geometry: PhysicalRect,
         commands: alloc::vec::Vec<path::Command>,
-        color: PremultipliedRgbaColor,
+        color: Color,
         stroke_width: f32,
         stroke_line_cap: i_slint_core::items::LineCap,
         stroke_line_join: i_slint_core::items::LineJoin,
@@ -2071,7 +2079,7 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
             &commands,
             &path_geometry,
             &clip_geometry,
-            color,
+            color.into(),
             stroke_width,
             stroke_line_cap,
             stroke_line_join,
@@ -2086,6 +2094,65 @@ struct PrepareScene {
     items: Vec<SceneItem>,
     vectors: SceneVectors,
     scale_factor: ScaleFactor,
+}
+
+#[cfg(feature = "path")]
+impl PrepareScene {
+    /// Rasterize a path once, at prepare time, and hand it to the scene as an alpha map.
+    ///
+    /// The line-by-line renderer composites one scanline at a time, so it can't call into
+    /// zeno the way the buffer renderer does. It can, however, already blend a colorized
+    /// alpha map per scanline - that is how glyphs are drawn. Rasterizing to a mask here
+    /// reuses that machinery whole, and keeps the (expensive) rasterization to once per
+    /// frame rather than once per scanline.
+    ///
+    /// Cost is one byte per pixel of the path's bounding box, held until the frame is
+    /// rendered. Paths whose bounding box covers much of the screen are correspondingly
+    /// expensive - a large ring costs the area of its bounding square, not of the ring.
+    fn process_path_as_alpha_map(
+        &mut self,
+        path_geometry: PhysicalRect,
+        clip_geometry: PhysicalRect,
+        commands: &[path::Command],
+        color: Color,
+        style: zeno::Style,
+    ) {
+        if color.alpha() == 0 {
+            return;
+        }
+
+        let Some((mask, width, height)) = path::rasterize_mask(commands, &path_geometry, style)
+        else {
+            return;
+        };
+
+        let Ok(width_u16) = u16::try_from(width) else {
+            return;
+        };
+
+        let texture = target_pixel_buffer::DrawTextureArgs {
+            data: target_pixel_buffer::TextureDataContainer::Shared {
+                buffer: SharedBufferData::AlphaMap {
+                    data: alloc::rc::Rc::from(mask.as_slice()),
+                    width: width_u16,
+                },
+                source_rect: euclid::rect(0, 0, width as _, height as _),
+            },
+            colorize: Some(color),
+            // The color already carries the state alpha, applied by draw_path
+            alpha: color.alpha(),
+            dst_x: path_geometry.origin.x as _,
+            dst_y: path_geometry.origin.y as _,
+            dst_width: width,
+            dst_height: height,
+            // The commands were already transformed into rotated screen space by
+            // convert_path_data_to_zeno, so the mask must not be rotated a second time.
+            rotation: RenderingRotation::NoRotation,
+            tiling: None,
+        };
+
+        self.process_target_texture(&texture, clip_geometry);
+    }
 }
 
 impl ProcessScene for PrepareScene {
@@ -2218,29 +2285,35 @@ impl ProcessScene for PrepareScene {
     #[cfg(feature = "path")]
     fn process_filled_path(
         &mut self,
-        _path_geometry: PhysicalRect,
-        _clip_geometry: PhysicalRect,
-        _commands: alloc::vec::Vec<path::Command>,
-        _color: PremultipliedRgbaColor,
+        path_geometry: PhysicalRect,
+        clip_geometry: PhysicalRect,
+        commands: alloc::vec::Vec<path::Command>,
+        color: Color,
     ) {
-        // Path rendering is not supported in line-by-line mode (PrepareScene/render_by_line)
-        // Only works with buffer-based rendering (RenderToBuffer)
+        self.process_path_as_alpha_map(
+            path_geometry,
+            clip_geometry,
+            &commands,
+            color,
+            zeno::Style::Fill(zeno::Fill::NonZero),
+        );
     }
 
     #[cfg(feature = "path")]
     fn process_stroked_path(
         &mut self,
-        _path_geometry: PhysicalRect,
-        _clip_geometry: PhysicalRect,
-        _commands: alloc::vec::Vec<path::Command>,
-        _color: PremultipliedRgbaColor,
-        _stroke_width: f32,
-        _stroke_line_cap: i_slint_core::items::LineCap,
-        _stroke_line_join: i_slint_core::items::LineJoin,
-        _stroke_miter_limit: f32,
+        path_geometry: PhysicalRect,
+        clip_geometry: PhysicalRect,
+        commands: alloc::vec::Vec<path::Command>,
+        color: Color,
+        stroke_width: f32,
+        stroke_line_cap: i_slint_core::items::LineCap,
+        stroke_line_join: i_slint_core::items::LineJoin,
+        stroke_miter_limit: f32,
     ) {
-        // Path rendering is not supported in line-by-line mode (PrepareScene/render_by_line)
-        // Only works with buffer-based rendering (RenderToBuffer)
+        let style =
+            path::stroke_style(stroke_width, stroke_line_cap, stroke_line_join, stroke_miter_limit);
+        self.process_path_as_alpha_map(path_geometry, clip_geometry, &commands, color, style);
     }
 }
 
@@ -3174,7 +3247,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
                     physical_geom,
                     clipped_geom,
                     zeno_commands.clone(),
-                    fill_color.into(),
+                    fill_color,
                 );
             }
         }
@@ -3193,7 +3266,7 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
                     physical_geom,
                     clipped_geom,
                     zeno_commands,
-                    stroke_color.into(),
+                    stroke_color,
                     physical_stroke_width,
                     stroke_line_cap,
                     stroke_line_join,
