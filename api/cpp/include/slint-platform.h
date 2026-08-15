@@ -539,6 +539,36 @@ struct Rgb565Pixel
     friend bool operator==(const Rgb565Pixel &lhs, const Rgb565Pixel &rhs) = default;
 };
 
+/// A 16bit RGB565 pixel whose two bytes are stored in the order SPI/QSPI display
+/// controllers expect, regardless of host endianness.
+///
+/// Rendering directly into this avoids byte-swapping the frame before handing it to the
+/// panel. On a 466x466 display that swap costs several milliseconds per fully-dirty frame
+/// even when written as an unrolled 32-bit loop, which is a large share of a frame budget
+/// on an MCU.
+struct Rgb565BigEndianPixel
+{
+    /// The raw 16 bits, already in the panel's byte order.
+    uint16_t v = 0;
+
+    /// Default constructor.
+    constexpr Rgb565BigEndianPixel() = default;
+
+    /// rief Constructor that constructs from an Rgb8Pixel.
+    explicit constexpr Rgb565BigEndianPixel(const Rgb8Pixel &pixel)
+        : v(byte_swapped(uint16_t(((pixel.r & 0b11111000) << 8) | ((pixel.g & 0b11111100) << 3)
+                                  | (pixel.b >> 3))))
+    {
+    }
+
+    /// Returns true if  lhs  rhs are pixels with identical colors.
+    friend bool operator==(const Rgb565BigEndianPixel &lhs, const Rgb565BigEndianPixel &rhs) =
+            default;
+
+private:
+    static constexpr uint16_t byte_swapped(uint16_t x) { return uint16_t((x << 8) | (x >> 8)); }
+};
+
 /// Slint's software renderer.
 ///
 /// To be used as a template parameter of the WindowAdapter.
@@ -815,13 +845,20 @@ public:
         if constexpr (std::is_same_v<PixelType, Rgb565Pixel>) {
             return PhysicalRegion { cbindgen_private::slint_software_renderer_render_by_line_rgb565(
                     inner, process_line_fn, &process_line_callback) };
+        } else if constexpr (std::is_same_v<PixelType, Rgb565BigEndianPixel>) {
+            return PhysicalRegion {
+                cbindgen_private::slint_software_renderer_render_by_line_rgb565be(
+                        inner, process_line_fn, &process_line_callback)
+            };
         } else if constexpr (std::is_same_v<PixelType, Rgb8Pixel>) {
             return PhysicalRegion { cbindgen_private::slint_software_renderer_render_by_line_rgb8(
                     inner, process_line_fn, &process_line_callback) };
         } else {
             static_assert(std::is_same_v<PixelType, Rgb8Pixel>
-                                  || std::is_same_v<PixelType, Rgb565Pixel>,
-                          "Unsupported PixelType. It must be either Rgb8Pixel or Rgb565Pixel");
+                                  || std::is_same_v<PixelType, Rgb565Pixel>
+                                  || std::is_same_v<PixelType, Rgb565BigEndianPixel>,
+                          "Unsupported PixelType. It must be Rgb8Pixel, Rgb565Pixel or "
+                          "Rgb565BigEndianPixel");
         }
     }
 
