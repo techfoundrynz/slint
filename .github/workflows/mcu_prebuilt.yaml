@@ -68,7 +68,7 @@ jobs:
                       -DRust_CARGO_TARGET=${{ matrix.rust_target }}
                       -DCMAKE_C_COMPILER=xtensa-esp-elf-gcc -DCMAKE_AR=xtensa-esp-elf-ar
                       -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
-                      -DSLINT_LIBRARY_CARGO_FLAGS='-Zbuild-std=core,alloc'
+                      -DSLINT_LIBRARY_CARGO_FLAGS='-Zbuild-std=core,alloc -Zbuild-std-features=panic_immediate_abort'
                       -DSLINT_COMPILER=download
                       ${{ env.SLINT_MCU_FEATURES }}
                   buildDirectory: ${{ runner.workspace }}/cppbuild
