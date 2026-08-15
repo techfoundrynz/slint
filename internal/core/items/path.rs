@@ -634,10 +634,15 @@ mod arc_dirty_tests {
             let band = annular_sector_bounds(233., 233., 221., 233., start, start + 1.)
                 .inflate(ARC_BAND_SLACK, ARC_BAND_SLACK);
             let frac = (band.size.width * band.size.height) / full;
+            // Expressed relative to the slack so the bound stays meaningful if it changes:
+            // a 1 degree sweep is a few pixels of arc, so the band is essentially the slack
+            // squared plus that, against the whole element.
+            let limit = ((4. * ARC_BAND_SLACK + 24.) * (4. * ARC_BAND_SLACK + 24.)) / full;
             assert!(
-                frac <= 0.02,
-                "start={start}: band is {:.1}% of the element",
-                frac * 100.
+                frac <= limit,
+                "start={start}: band is {:.2}% of the element, limit {:.2}%",
+                frac * 100.,
+                limit * 100.
             );
         }
     }
