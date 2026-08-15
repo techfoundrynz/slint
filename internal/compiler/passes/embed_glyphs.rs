@@ -471,6 +471,28 @@ fn embed_alpha_map_glyphs(
                     let scale = *pixel_size as f32 / fm.units_per_em as f32;
                     let advance_width = gm.advance_width(glyph_id) * scale;
 
+                    // Embed only the configured characters above a pixel size threshold. A
+                    // full charset at large sizes costs more flash than an MCU target can
+                    // spare, and large text is typically numeric readouts. The advance width
+                    // is still emitted so layout is unaffected; only the bitmap is dropped.
+                    let limit_threshold = std::env::var("SLINT_LIMIT_GLYPHS_THRESHOLD")
+                        .ok()
+                        .and_then(|val| val.parse::<i16>().ok())
+                        .unwrap_or(125);
+                    let limit_chars = std::env::var("SLINT_LIMIT_GLYPHS_CHARS")
+                        .unwrap_or_else(|_| "0123456789., ".to_string());
+                    if *pixel_size > limit_threshold && !limit_chars.contains(*code_point) {
+                        return BitmapGlyph {
+                            x: 0,
+                            y: 0,
+                            width: 0,
+                            height: 0,
+                            x_advance: i16::try_from((advance_width * 64.) as i64)
+                                .expect("large advance width"),
+                            data: vec![],
+                        };
+                    }
+
                     SCALE_CONTEXT.with(|ctx| {
                         let font_ref = swash_font_ref(font_to_use);
                         let mut ctx = ctx.borrow_mut();
