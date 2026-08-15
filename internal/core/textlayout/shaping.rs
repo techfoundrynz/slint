@@ -172,12 +172,35 @@ pub struct ShapeBuffer<Length> {
     pub text_runs: Vec<TextRun>,
 }
 
+
+/// Diagnostic hook: brackets every text shaping pass so the firmware can total the cost.
+///
+/// Shaping is the suspected bulk of the per-frame item-tree walk on MCU targets, because
+/// reading a Text item's geometry evaluates its layout binding, which calls `text_size`.
+/// The firmware supplies the clock; on any other target this compiles to nothing.
+#[allow(unsafe_code)]
+mod shape_mark {
+    #[cfg(target_arch = "xtensa")]
+    unsafe extern "C" {
+        fn slint_esp_phase_mark(phase: u32);
+    }
+
+    #[cfg(target_arch = "xtensa")]
+    pub fn mark(phase: u32) {
+        unsafe { slint_esp_phase_mark(phase) }
+    }
+
+    #[cfg(not(target_arch = "xtensa"))]
+    pub fn mark(_phase: u32) { }
+}
+
 impl<Length> ShapeBuffer<Length> {
     pub fn new<Font>(layout: &TextLayout<Font>, text: &str) -> Self
     where
         Font: AbstractFont<Length = Length>,
         Length: Copy + core::ops::AddAssign,
     {
+        shape_mark::mark(5);
         let mut glyphs = Vec::new();
         let text_runs = ShapeBoundaries::new(text)
             .scan(0, |run_start, run_end| {
@@ -211,6 +234,7 @@ impl<Length> ShapeBuffer<Length> {
             })
             .collect();
 
+        shape_mark::mark(6);
         Self { glyphs, text_runs }
     }
 }
