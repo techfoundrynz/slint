@@ -279,7 +279,7 @@ struct ArcSnapshotCell {
 /// so a coarse grid costs dirty pixels. Cells also coalesce - two bands landing in one cell
 /// become one rect rather than two, which matters because a DirtyRegion holds only three
 /// before merging them into their union.
-const ARC_GRID: usize = 7;
+const ARC_GRID: usize = 3;
 
 /// How far outside its exact extremes the renderer can actually paint the arc, in pixels.
 ///
