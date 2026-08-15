@@ -267,6 +267,14 @@ struct ArcSnapshotCell {
     /// and cleared when it is drawn, so a region computed for a frame that was never painted
     /// keeps its debt. An empty rect means nothing is owed.
     pending: core::cell::Cell<LogicalRect>,
+    /// The band invalidated on the previous frame, kept for one extra frame and unioned into
+    /// the next region. commit_arc_drawn runs during the scene-build walk - Path::render only
+    /// pushes a SceneItem, the pixels are painted later per line inside render_by_line - so
+    /// the debt is discharged before anything reaches the panel. Anything marked but not
+    /// actually painted was simply forgotten, which showed up as gaps in an arc whose value
+    /// was climbing while rendering stalled and caught up. Repainting the previous band once
+    /// more costs a little area and makes a late or dropped paint self-correcting.
+    prev_band: core::cell::Cell<LogicalRect>,
     /// Set once the caller has actually invalidated a region covering the debt above. The
     /// debt is only discharged when that happened AND the arc then rendered: the item can be
     /// drawn because some neighbouring item made the region overlap it, in which case the
@@ -388,9 +396,11 @@ impl Path {
         // slack covers how far outside its exact extremes the renderer actually paints, and
         // ArcGauge puts the ring's outer edge on the element edge, so this is deliberately
         // not clamped to the element.
+        // Carry the previous frame's band forward once. See `prev_band`.
+        let prev = self.arc_snapshot.prev_band.replace(pending);
+        let owed = if prev.is_empty() { pending } else { pending.union(&prev) };
         Some(
-            pending
-                .inflate(ARC_BAND_SLACK, ARC_BAND_SLACK)
+            owed.inflate(ARC_BAND_SLACK, ARC_BAND_SLACK)
                 .translate(geometry.origin.to_vector()),
         )
     }
