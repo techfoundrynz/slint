@@ -301,10 +301,10 @@ struct ArcSnapshotCell {
 /// clean and a 93px one did not, and why every single-frame test passed: they use an integer
 /// centre and integer radii, making all of these errors identically zero.
 /// `bounds_cover_what_the_renderer_actually_paints` pins the bound at 5; this keeps 1 spare.
-const ARC_BAND_SLACK: Coord = 6 as Coord;
+const ARC_BAND_SLACK: Coord = 30 as Coord;
 
 /// Diagnostic switch: when true every arc change invalidates the whole element.
-const ARC_NO_NARROWING: bool = true;
+const ARC_NO_NARROWING: bool = false;
 
 impl Path {
     /// The region to invalidate when this Path is dirty, if a narrower one than the whole
