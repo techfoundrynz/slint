@@ -297,6 +297,13 @@ const ARC_GRID: usize = 3;
 const ARC_BAND_SLACK: Coord = 6 as Coord;
 const ARC_CELLS_ALL: u64 = (1u64 << (ARC_GRID * ARC_GRID)) - 1;
 
+/// Largest per-frame movement of either arc end that is still worth narrowing, in degrees.
+const ARC_MAX_DELTA: f32 = 60.;
+
+/// Beyond this many owed cells the narrowed rect is most of the element anyway, so take the
+/// whole thing rather than run the wide-band path that has proven fragile.
+const ARC_MAX_CELLS: u32 = (ARC_GRID * ARC_GRID) as u32 / 2;
+
 impl Path {
     /// The region to invalidate when this Path is dirty, if a narrower one than the whole
     /// element can be justified.
@@ -313,16 +320,24 @@ impl Path {
         let before = self.arc_snapshot.last.replace(now);
         let mut pending = self.arc_snapshot.pending.get();
 
-        // Only the two ends may differ, and neither by more than half a turn - past that a
+        // Only the two ends may differ, and neither by more than ARC_MAX_DELTA. Past that a
         // band bounds nothing useful, as lv_arc_set_start_angle also decides. Anything else,
         // including the first frame, owes the whole element.
+        //
+        // The threshold is well below half a turn on purpose. A large per-frame delta is
+        // exactly what a dropped frame produces, and it is where narrowing both stops paying
+        // (the band's bounding box approaches the element) and is most exposed: a wide band
+        // straddles more cell boundaries, and any frame whose painting does not cover every
+        // owed cell loses that debt permanently, because commit_arc_drawn clears the whole
+        // mask on the strength of Path::render having been entered. Under rapid updates that
+        // showed up as arc fragments left on screen as the frame rate fell.
         let ends = [
             (before.start, now.start),
             (before.start + before.sweep, now.start + now.sweep),
         ];
         let attributable = before.valid
             && ArcSnapshot { start: now.start, sweep: now.sweep, ..before } == now
-            && !ends.iter().any(|(a, b)| (b - a).abs() > 180.);
+            && !ends.iter().any(|(a, b)| (b - a).abs() > ARC_MAX_DELTA);
 
         if attributable {
             let half = now.stroke_width / 2.;
@@ -349,6 +364,11 @@ impl Path {
             pending = ARC_CELLS_ALL;
         }
 
+        // A mask covering half the grid is not a saving; take the whole element instead of
+        // trusting a band that wide.
+        if pending.count_ones() > ARC_MAX_CELLS {
+            pending = ARC_CELLS_ALL;
+        }
         self.arc_snapshot.pending.set(pending);
 
         // Nothing attributable moved, so let the caller invalidate the item's own rect.
