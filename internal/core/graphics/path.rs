@@ -14,6 +14,8 @@ use auto_enums::auto_enum;
 use const_field_offset::FieldOffsets;
 use euclid::Point2D;
 use i_slint_core_macros::*;
+#[cfg(not(feature = "std"))]
+use num_traits::Float;
 
 #[repr(C)]
 #[derive(FieldOffsets, Default, SlintElement, Clone, Debug, PartialEq)]
@@ -304,7 +306,10 @@ impl FittedPath {
     pub fn sample_at(&self, t: f32) -> Option<(Point2D<f32, LogicalPx>, f32)> {
         use lyon_algorithms::measure::SampleType;
 
-        let mut rem = t.rem_euclid(1.);
+        // f32::rem_euclid is a std inherent method, so it doesn't exist in a no_std
+        // build. For a positive divisor it's identical to t - t.floor(), and floor
+        // comes from num_traits::Float with the same signature as the std method.
+        let mut rem = t - t.floor();
         if rem == 0.0 && t != 0.0 {
             // This makes the path end at the end and not the start
             rem = 1.0;
