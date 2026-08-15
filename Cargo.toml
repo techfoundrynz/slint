@@ -174,11 +174,7 @@ objc2 = { version = "0.6.3" }
 lsp-types = "0.95.0"
 
 [profile.release]
-# "immediate-abort" rather than "abort": it drops the panic formatting and unwinding
-# machinery from the std build entirely. On the MCU target the frame rate is bound by
-# instruction fetch from flash, so removing dead code is a direct speedup, and there is
-# nowhere for a panic message to go on that device anyway.
-panic = "immediate-abort"
+panic = "abort"
 
 # The MCU target executes this from flash in DIO mode at 80MHz - roughly 20MB/s of
 # instruction fetch - through a 32KB instruction cache. Profiling the item-tree walk there
