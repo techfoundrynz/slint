@@ -157,6 +157,10 @@ impl CachedItemBoundingBoxAndTransform {
 }
 
 struct PartialRenderingCachedData {
+    /// Bounds of this item's whole subtree as of the last walk, in the parent's coordinate
+    /// space, or `None` if something in it paints outside its geometry unboundedly. Used to
+    /// skip walking subtrees that cannot reach the dirty region.
+    pub subtree_bounds: Option<Option<LogicalRect>>,
     /// The geometry of the item as it was previously rendered.
     pub data: CachedItemBoundingBoxAndTransform,
     /// The property tracker that should be used to evaluate whether the item needs to be re-rendered
@@ -164,7 +168,7 @@ struct PartialRenderingCachedData {
 }
 impl PartialRenderingCachedData {
     fn new(data: CachedItemBoundingBoxAndTransform) -> Self {
-        Self { data, tracker: None }
+        Self { data, tracker: None, subtree_bounds: None }
     }
 }
 
@@ -415,7 +419,7 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                 let rendering_data = item.cached_rendering_data_offset();
                 let mut cache = self.cache.borrow_mut();
                 match rendering_data.get_entry(&mut cache) {
-                    Some(PartialRenderingCachedData { data: cached_geom, tracker }) => {
+                    Some(PartialRenderingCachedData { data: cached_geom, tracker, .. }) => {
                         let rendering_dirty = tracker.as_ref().is_some_and(|tr| tr.is_dirty());
                         let old_geom = cached_geom.clone();
 
@@ -639,6 +643,37 @@ macro_rules! forward_rendering_call2 {
 }
 
 impl<T: ItemRenderer + ItemRendererFeatures> ItemRenderer for PartialRenderer<'_, T> {
+    fn subtree_bounds(&mut self, item_rc: &ItemRc) -> Option<LogicalRect> {
+        let item = item_rc.borrow();
+        let rendering_data = item.cached_rendering_data_offset();
+        let mut cache = self.cache.borrow_mut();
+        match rendering_data.get_entry(&mut cache) {
+            // Outer None: never walked, so nothing to prune against. Inner None: unprunable.
+            Some(entry) => entry.subtree_bounds.flatten(),
+            None => None,
+        }
+    }
+
+    fn set_subtree_bounds(&mut self, item_rc: &ItemRc, bounds: Option<LogicalRect>) {
+        let item = item_rc.borrow();
+        let rendering_data = item.cached_rendering_data_offset();
+        let mut cache = self.cache.borrow_mut();
+        if let Some(entry) = rendering_data.get_entry(&mut cache) {
+            entry.subtree_bounds = Some(bounds);
+        }
+    }
+
+    fn subtree_can_paint(&mut self, bounds: &LogicalRect) -> bool {
+        match self.get_current_clip().intersection(bounds) {
+            Some(clipped) => {
+                let screen =
+                    self.current_transform().outer_transformed_rect(&clipped.cast()).cast();
+                self.dirty_region.draw_intersects(screen)
+            }
+            None => false,
+        }
+    }
+
     fn filter_item(
         &mut self,
         item_rc: &ItemRc,
@@ -652,7 +687,7 @@ impl<T: ItemRenderer + ItemRendererFeatures> ItemRenderer for PartialRenderer<'_
         let rendering_data = item.cached_rendering_data_offset();
         let mut cache = self.cache.borrow_mut();
         let item_bounding_rect = match rendering_data.get_entry(&mut cache) {
-            Some(PartialRenderingCachedData { data, tracker: _ }) => *data.bounding_rect(),
+            Some(PartialRenderingCachedData { data, .. }) => *data.bounding_rect(),
             None => {
                 // This item was created between the computation of the dirty region and the actual rendering.
                 item_rc.bounding_rect(&item_geometry, window_adapter)
