@@ -434,6 +434,18 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                             ItemRef::downcast_pin::<crate::items::Path>(item)
                                 .and_then(|p| p.arc_dirty_rect(*new_geom.bounding_rect()))
                         });
+                        // Tells the Path that a region covering its owed band really was
+                        // invalidated. Without this it discharges the debt on being rendered,
+                        // which also happens when a neighbouring item is what put it inside
+                        // the frame's region - and then the band is never painted.
+                        #[cfg(feature = "path")]
+                        let mark_arc_debt = || {
+                            if let Some(p) = ItemRef::downcast_pin::<crate::items::Path>(item) {
+                                p.arc_debt_marked();
+                            }
+                        };
+                        #[cfg(not(feature = "path"))]
+                        let mark_arc_debt = || {};
                         #[cfg(not(feature = "path"))]
                         let arc_narrowed: Option<LogicalRect> = None;
                         if ItemRef::downcast_pin::<Clip>(item).is_some()
@@ -468,6 +480,7 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
 
                             *cached_geom = new_geom;
 
+                            mark_arc_debt();
                             return ItemVisitorResult::Continue(new_state);
                         }
 
@@ -493,6 +506,7 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                 state.transform_to_screen,
                                 &state.clipped,
                             );
+                            mark_arc_debt();
                             if moved {
                                 self.mark_dirty_rect(
                                     cached_geom.bounding_rect(),
@@ -514,6 +528,7 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                     state.transform_to_screen,
                                     &state.clipped,
                                 );
+                                mark_arc_debt();
                             } else if let Some(tr) = &tracker {
                                 tr.as_ref().register_as_dependency_to_current_binding();
                             }

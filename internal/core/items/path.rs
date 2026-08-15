@@ -267,6 +267,12 @@ struct ArcSnapshotCell {
     /// and cleared when it is drawn, so a region computed for a frame that was never painted
     /// keeps its debt. An empty rect means nothing is owed.
     pending: core::cell::Cell<LogicalRect>,
+    /// Set once the caller has actually invalidated a region covering the debt above. The
+    /// debt is only discharged when that happened AND the arc then rendered: the item can be
+    /// drawn because some neighbouring item made the region overlap it, in which case the
+    /// owed band was never in the region and never painted. Clearing on render alone lost
+    /// those pixels for good, which showed up as arc fragments under rapid updates.
+    pending_marked: core::cell::Cell<bool>,
     /// Set when something a band cannot describe changed - a colour, a radius, a resize, the
     /// first frame - so the whole element is owed. Separate from `pending` because that debt
     /// also has to survive a frame that is computed but never painted.
@@ -404,10 +410,23 @@ impl Path {
     fn commit_arc_drawn(self: Pin<&Self>, size: LogicalSize) {
         if let Some(now) = self.arc_snapshot_now(size) {
             self.arc_snapshot.last.set(now);
-            // Drawn, so nothing is owed.
-            self.arc_snapshot.pending.set(LogicalRect::default());
-            self.arc_snapshot.pending_full.set(false);
+            // Only discharge the debt if a region covering it was actually invalidated this
+            // frame. Rendering alone is not proof it was painted - the item is drawn whenever
+            // the frame's region overlaps it at all, including when that overlap came from a
+            // neighbouring item and left the owed band outside it.
+            if self.arc_snapshot.pending_marked.get() {
+                self.arc_snapshot.pending.set(LogicalRect::default());
+                self.arc_snapshot.pending_full.set(false);
+            }
         }
+        self.arc_snapshot.pending_marked.set(false);
+    }
+
+    /// Called by the partial renderer once it has invalidated a region that covers whatever
+    /// `arc_dirty_rect` reported as owed - either the narrowed band itself or, in the paths
+    /// that ignore it, the item's whole bounding rect.
+    pub fn arc_debt_marked(self: Pin<&Self>) {
+        self.arc_snapshot.pending_marked.set(true);
     }
 }
 
