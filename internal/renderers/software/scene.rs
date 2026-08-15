@@ -22,6 +22,7 @@ pub struct SceneVectors {
     pub linear_gradients: Vec<LinearGradientCommand>,
     pub radial_gradients: Vec<RadialGradientCommand>,
     pub conic_gradients: Vec<ConicGradientCommand>,
+    pub arcs: Vec<ArcCommand>,
 }
 
 pub struct Scene {
@@ -310,6 +311,10 @@ pub enum SceneCommand {
     ConicGradient {
         conic_gradient_index: u16,
     },
+    /// arc_index is an index in the [`SceneVectors::arcs`] array
+    Arc {
+        arc_index: u16,
+    },
 }
 
 pub struct SceneTexture<'a> {
@@ -509,6 +514,44 @@ pub fn compute_range_in_buffer(
     let start = pixel_stride * source_rect.min_y() as usize + source_rect.min_x() as usize;
     let end = pixel_stride * (source_rect.max_y() - 1) as usize + source_rect.max_x() as usize;
     start..end
+}
+
+/// A stroked circular arc, drawn analytically per scanline.
+///
+/// A ring's coverage comes straight from the circle equation, so nothing is rasterized
+/// ahead of time and no intermediate buffer exists: only the pixels the ring actually
+/// touches are visited. A 466px ring with a 12px stroke covers under 8% of its bounding
+/// box, which is the whole difference between this and rasterizing to a coverage mask.
+#[derive(Debug)]
+pub struct ArcCommand {
+    /// Centre of the circle, relative to the span origin.
+    pub center_x: PhysicalLength,
+    pub center_y: PhysicalLength,
+    /// Outer and inner edge of the stroke.
+    pub outer_radius: PhysicalLength,
+    pub inner_radius: PhysicalLength,
+    pub color: PremultipliedRgbaColor,
+    /// Unit vectors along the two boundary rays. A point is inside the wedge when it is on
+    /// the inner side of both (or, for a reflex sweep, either).
+    ///
+    /// Kept in f32 rather than fixed point on purpose: the row's clip bound divides by the
+    /// ray's y component, so for a near horizontal ray any error in it is amplified by
+    /// 1/y. At a tenth of a degree from horizontal, 1.15 fixed point was enough to move the
+    /// bound by over a hundred pixels, which showed up as the arc failing to draw around 3
+    /// and 9 o'clock.
+    pub start_dir: (f32, f32),
+    pub end_dir: (f32, f32),
+    /// Sweep greater than 180 degrees, where the wedge is the union of the two half
+    /// planes rather than their intersection.
+    pub reflex: bool,
+    /// Sweep covers the whole circle, so there is no angular clipping to apply.
+    pub full_circle: bool,
+    /// Round caps: a disc of half the stroke width centred on each end of the arc,
+    /// unioned with the ring. Centres are relative to the span origin, like the circle's.
+    pub round_caps: bool,
+    pub cap_radius: PhysicalLength,
+    pub start_cap: (PhysicalLength, PhysicalLength),
+    pub end_cap: (PhysicalLength, PhysicalLength),
 }
 
 #[derive(Debug)]

@@ -311,6 +311,268 @@ pub(super) fn draw_texture_line(
     }
 }
 
+/// Draw one line of a stroked circular arc into the line buffer.
+///
+/// Coverage comes from the circle equation rather than from a rasterized mask, so the only
+/// pixels touched are the ones the ring passes through. Per row this is two square roots
+/// for the radial edges plus O(1) work for the angular ends; the interior of each span is
+/// a flat `blend_slice`.
+///
+/// The row is built in three stages:
+///   1. radial - `x = sqrt(r^2 - y^2)` for the outer and inner edge gives the row's one or
+///      two runs (two when the row passes through the hole)
+///   2. angular - each boundary ray is a half plane whose edge crosses this row at a single
+///      x, so the wedge reduces to an interval; a reflex sweep is the union of two
+///   3. the intersection of the two, emitted as solid runs with partial pixels at the ends
+pub(super) fn draw_arc_line(
+    span: &PhysicalRect,
+    line: PhysicalLength,
+    arc: &super::ArcCommand,
+    line_buffer: &mut [impl TargetPixel],
+    extra_left_clip: i16,
+) {
+    let width = line_buffer.len() as i32;
+    if width <= 0 || arc.color.alpha == 0 {
+        return;
+    }
+
+    // Centre of this pixel row relative to the circle centre.
+    let dy = (line.get() - span.origin.y_length().get() - arc.center_y.get()) as f32 + 0.5;
+    let outer = arc.outer_radius.get() as f32;
+    let inner = arc.inner_radius.get().max(0) as f32;
+    let dy_abs = if dy < 0. { -dy } else { dy };
+    if dy_abs >= outer {
+        return;
+    }
+
+    let sqrt = |v: f32| -> f32 {
+        if v <= 0. { 0. } else { Float::sqrt(v) }
+    };
+
+    // Half width of the ring at this row. The outer edge always exists here; the inner
+    // edge only when the row passes through the hole.
+    let half_outer = sqrt(outer * outer - dy * dy);
+    let has_hole = dy_abs < inner;
+    let half_inner = if has_hole { sqrt(inner * inner - dy * dy) } else { 0. };
+
+    // Circle centre in line-buffer coordinates. center_x is relative to the span origin,
+    // and the buffer starts extra_left_clip pixels into the span.
+    let cx = (arc.center_x.get() - extra_left_clip) as f32;
+
+    // The row's runs before angular clipping. Without a hole the ring is one run.
+    let mut runs: [(f32, f32); 2] = [(0., 0.); 2];
+    let run_count = if has_hole {
+        runs[0] = (cx - half_outer, cx - half_inner);
+        runs[1] = (cx + half_inner, cx + half_outer);
+        2
+    } else {
+        runs[0] = (cx - half_outer, cx + half_outer);
+        1
+    };
+
+    // Angular clipping. For a boundary ray with unit direction d the wedge side is
+    // cross(d, p) >= 0, which for a fixed row is linear in x and so clips the row to a
+    // half line. A reflex sweep is the union of the two half planes, which can leave a
+    // gap in the middle of the row.
+    let half_plane = |dir: (f32, f32)| -> (f32, f32) {
+        let (dx_f, dy_f) = dir;
+        // cross(d, p) = d.x * dy - d.y * dx >= 0  =>  dx <= (d.x * dy) / d.y  when d.y > 0
+        if dy_f > 0. {
+            (f32::NEG_INFINITY, cx + (dx_f * dy) / dy_f)
+        } else if dy_f < 0. {
+            (cx + (dx_f * dy) / dy_f, f32::INFINITY)
+        } else if dx_f * dy >= 0. {
+            // A horizontal ray has no x to solve for, so the row is in or out as a whole.
+            // Rows within half a pixel of the centre are handled per pixel instead, above.
+            (f32::NEG_INFINITY, f32::INFINITY)
+        } else {
+            (0., 0.)
+        }
+    };
+
+    // The row a boundary ray passes through, done per pixel.
+    //
+    // Clipping a row to an x interval per ray cannot describe this row. A ray on the
+    // horizontal has no x to solve for - its half plane boundary *is* the row - and a half
+    // turn arc has both rays on it at once, where the intersection of two half planes cannot
+    // express "both tips". Testing each pixel against the wedge directly has neither problem.
+    // It costs one row per ray, so at most two per arc per frame.
+    if !arc.full_circle && dy_abs <= 0.5 {
+        let inside = |dx: f32| {
+            // cross(start, p) >= 0 is at or after the start; cross(p, end) >= 0 is at or
+            // before the end.
+            let after_start = arc.start_dir.0 * dy - arc.start_dir.1 * dx >= 0.;
+            let before_end = dx * arc.end_dir.1 - dy * arc.end_dir.0 >= 0.;
+            if arc.reflex { after_start || before_end } else { after_start && before_end }
+        };
+        let cap_covers = |dx: f32| {
+            if !arc.round_caps {
+                return false;
+            }
+            let h = arc.cap_radius.get() as f32;
+            [arc.start_cap, arc.end_cap].iter().any(|cap| {
+                let cdx = dx - (cap.0.get() - arc.center_x.get()) as f32;
+                let cdy = dy - (cap.1.get() - arc.center_y.get()) as f32;
+                cdx * cdx + cdy * cdy <= h * h
+            })
+        };
+        // Sweep the ring runs *and* the cap discs: a cap can cover a pixel outside the ring's
+        // radial run on this row, so the run clip gates only the ring test.
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for run in runs.iter().take(run_count) {
+            lo = lo.min(run.0);
+            hi = hi.max(run.1);
+        }
+        if arc.round_caps {
+            let h = arc.cap_radius.get() as f32;
+            for cap in [arc.start_cap, arc.end_cap] {
+                let ccx = (cap.0.get() - extra_left_clip) as f32;
+                let cdy = dy - (cap.1.get() - arc.center_y.get()) as f32;
+                let half_chord = h * h - cdy * cdy;
+                if half_chord > 0. {
+                    let half_chord = Float::sqrt(half_chord);
+                    lo = lo.min(ccx - half_chord);
+                    hi = hi.max(ccx + half_chord);
+                }
+            }
+        }
+        if hi > lo {
+            let from = lo.max(0.).floor() as i32;
+            let to = (hi.min(width as f32).ceil() as i32).min(width);
+            for x in from..to {
+                let px = x as f32 + 0.5;
+                let dx = px - cx;
+                let in_ring = runs
+                    .iter()
+                    .take(run_count)
+                    .any(|run| px >= run.0 && px <= run.1);
+                if (in_ring && inside(dx)) || cap_covers(dx) {
+                    line_buffer[x as usize].blend(arc.color);
+                }
+            }
+        }
+        return;
+    }
+
+    // Up to four from the ring (two runs, each possibly split by a reflex wedge) plus one
+    // per round cap.
+    let mut spans: [(f32, f32); 6] = [(0., 0.); 6];
+    let mut span_count = 0usize;
+    {
+        let mut push = |lo: f32, hi: f32| {
+            if hi > lo && span_count < 6 {
+                spans[span_count] = (lo, hi);
+                span_count += 1;
+            }
+        };
+        let a = if arc.full_circle { (f32::NEG_INFINITY, f32::INFINITY) } else { half_plane(arc.start_dir) };
+        let b = if arc.full_circle {
+            (f32::NEG_INFINITY, f32::INFINITY)
+        } else {
+            half_plane((-arc.end_dir.0, -arc.end_dir.1))
+        };
+        for run in runs.iter().take(run_count) {
+            if arc.full_circle || !arc.reflex {
+                push(run.0.max(a.0).max(b.0), run.1.min(a.1).min(b.1));
+            } else {
+                // Union of the two half planes, merged when they overlap so no pixel is
+                // blended twice.
+                let mut p0 = (run.0.max(a.0), run.1.min(a.1));
+                let mut p1 = (run.0.max(b.0), run.1.min(b.1));
+                if p0.0 > p1.0 {
+                    core::mem::swap(&mut p0, &mut p1);
+                }
+                if p0.1 > p0.0 && p1.1 > p1.0 && p0.1 >= p1.0 {
+                    push(p0.0, if p0.1 > p1.1 { p0.1 } else { p1.1 });
+                } else {
+                    push(p0.0, p0.1);
+                    push(p1.0, p1.1);
+                }
+            }
+        }
+
+        // Round caps: a disc at each end of the sweep, which on this row is just another
+        // span from the circle equation. A full circle has no ends.
+        if arc.round_caps && !arc.full_circle {
+            let h = arc.cap_radius.get() as f32;
+            for cap in [arc.start_cap, arc.end_cap] {
+                let ccx = (cap.0.get() - extra_left_clip) as f32;
+                let dyc = dy - (cap.1.get() - arc.center_y.get()) as f32;
+                if dyc > -h && dyc < h {
+                    let half = sqrt(h * h - dyc * dyc);
+                    push(ccx - half, ccx + half);
+                }
+            }
+        }
+    }
+
+    // The spans can now overlap - a cap sits on top of the ring it terminates - so sort
+    // and merge them. Blending the same pixel twice would darken the overlap, and with a
+    // translucent stroke the seam would be plainly visible.
+    for i in 1..span_count {
+        let v = spans[i];
+        let mut j = i;
+        while j > 0 && spans[j - 1].0 > v.0 {
+            spans[j] = spans[j - 1];
+            j -= 1;
+        }
+        spans[j] = v;
+    }
+    let mut merged: [(f32, f32); 6] = [(0., 0.); 6];
+    let mut merged_count = 0usize;
+    for k in 0..span_count {
+        if merged_count > 0 && spans[k].0 <= merged[merged_count - 1].1 {
+            if spans[k].1 > merged[merged_count - 1].1 {
+                merged[merged_count - 1].1 = spans[k].1;
+            }
+        } else {
+            merged[merged_count] = spans[k];
+            merged_count += 1;
+        }
+    }
+
+    // Emit. Both ends of every span carry fractional coverage, whether that end came from
+    // the circle or from a boundary ray; everything between is opaque.
+    for &(x0, x1) in merged.iter().take(merged_count) {
+        let x0 = x0.max(0.);
+        let x1 = x1.min(width as f32);
+        if x1 <= x0 {
+            continue;
+        }
+        let first = x0.floor() as i32;
+        let last = ((x1.ceil() as i32) - 1).min(width - 1);
+        if first > last || first < 0 {
+            continue;
+        }
+        if first == last {
+            blend_coverage(&mut line_buffer[first as usize], arc.color, x1 - x0);
+            continue;
+        }
+        blend_coverage(&mut line_buffer[first as usize], arc.color, (first + 1) as f32 - x0);
+        let solid_start = (first + 1) as usize;
+        let solid_end = last as usize;
+        if solid_start < solid_end {
+            TargetPixel::blend_slice(&mut line_buffer[solid_start..solid_end], arc.color);
+        }
+        blend_coverage(&mut line_buffer[last as usize], arc.color, x1 - last as f32);
+    }
+}
+
+#[inline]
+fn blend_coverage(pixel: &mut impl TargetPixel, color: PremultipliedRgbaColor, coverage: f32) {
+    let cov = (coverage.clamp(0., 1.) * 255.) as u32;
+    if cov == 0 {
+        return;
+    }
+    pixel.blend(PremultipliedRgbaColor {
+        alpha: ((color.alpha as u32 * cov) / 255) as u8,
+        red: ((color.red as u32 * cov) / 255) as u8,
+        green: ((color.green as u32 * cov) / 255) as u8,
+        blue: ((color.blue as u32 * cov) / 255) as u8,
+    });
+}
+
 /// draw one line of the rounded rectangle in the line buffer
 #[allow(clippy::unnecessary_cast)] // Coord
 pub(super) fn draw_rounded_rectangle_line(
@@ -836,6 +1098,324 @@ impl PremultipliedRgbaColor {
 }
 
 /// Trait for the pixels in the buffer
+#[cfg(test)]
+mod arc_line_tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use i_slint_core::graphics::Rgb8Pixel;
+
+    // A 466px dial with a 12px stroke. At this
+    // size most rows pass through the ring's hole and split into a left and a right run;
+    // a 22px test arc barely exercises that at all.
+    const C: i16 = 233;
+    const OUTER: i16 = 233;
+    const INNER: i16 = 221;
+    const W: usize = 466;
+
+    fn arc(start_deg: f32, sweep_deg: f32) -> super::super::ArcCommand {
+        let unit = |d: f32| {
+            let r = d.to_radians();
+            (r.cos(), r.sin())
+        };
+        super::super::ArcCommand {
+            center_x: PhysicalLength::new(C),
+            center_y: PhysicalLength::new(C),
+            outer_radius: PhysicalLength::new(OUTER),
+            inner_radius: PhysicalLength::new(INNER),
+            // #ff8800, the gauge indicator colour. White quantises exactly in 565 and so
+            // cannot show a rounding difference between the two fill paths.
+            color: PremultipliedRgbaColor { alpha: 255, red: 255, green: 136, blue: 0 },
+            start_dir: unit(start_deg),
+            end_dir: unit(start_deg + sweep_deg),
+            reflex: sweep_deg.abs() > 180.,
+            full_circle: sweep_deg.abs() >= 360.,
+            round_caps: false,
+            cap_radius: PhysicalLength::new((OUTER - INNER) / 2),
+            start_cap: (PhysicalLength::new(0), PhysicalLength::new(0)),
+            end_cap: (PhysicalLength::new(0), PhysicalLength::new(0)),
+        }
+    }
+
+    /// Painted x positions on one row of a full-width buffer.
+    fn painted(a: &super::super::ArcCommand, row: i16) -> Vec<usize> {
+        let span = PhysicalRect::new(euclid::point2(0, 0), euclid::size2(W as i16, W as i16));
+        let mut buf = vec![Rgb8Pixel { r: 0, g: 0, b: 0 }; W];
+        draw_arc_line(&span, PhysicalLength::new(row), a, &mut buf, 0);
+        buf.iter().enumerate().filter(|(_, p)| p.r > 40).map(|(i, _)| i).collect()
+    }
+
+    /// Painted x positions on one row when the buffer covers only [from, to) of the span,
+    /// which is what a narrowed dirty region hands over.
+    fn painted_clipped(
+        a: &super::super::ArcCommand,
+        row: i16,
+        from: usize,
+        to: usize,
+    ) -> Vec<usize> {
+        let span = PhysicalRect::new(euclid::point2(0, 0), euclid::size2(W as i16, W as i16));
+        let mut buf = vec![Rgb8Pixel { r: 0, g: 0, b: 0 }; to - from];
+        draw_arc_line(&span, PhysicalLength::new(row), a, &mut buf, from as i16);
+        buf.iter().enumerate().filter(|(_, p)| p.r > 40).map(|(i, _)| i + from).collect()
+    }
+
+    /// Drawing clipped to a narrow window must paint exactly what the full-width pass paints
+    /// inside that window.
+    ///
+    /// This is the difference between a narrowed dirty region and a full-element one, and it
+    /// is invisible on a full repaint: any pixel the clipped pass drops is simply left as the
+    /// previous frame had it, which reads as a gap in the arc that repairs itself later.
+    #[test]
+    fn clipped_drawing_matches_full_width() {
+        for (start, sweep) in [
+            (140., 60.),
+            (140., 200.),
+            (330., 60.),
+            (45., 90.),
+            (0., 30.),
+            (170., 20.),
+        ] {
+            let a = arc(start, sweep);
+            for row in [C - OUTER + 3, C - 120, C - 1, C, C + 1, C + 120, C + OUTER - 3] {
+                let full = painted(&a, row);
+                // Windows deliberately cutting through the arc, including odd edges.
+                for &(from, to) in &[
+                    (0usize, 120usize),
+                    (100, 240),
+                    (101, 241),
+                    (200, 300),
+                    (233, 400),
+                    (300, 466),
+                    (111, 355),
+                ] {
+                    let clipped = painted_clipped(&a, row, from, to);
+                    let expect: Vec<usize> =
+                        full.iter().copied().filter(|x| *x >= from && *x < to).collect();
+                    assert_eq!(
+                        clipped, expect,
+                        "start={start} sweep={sweep} row={row} window={from}..{to}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Like `arc`, but with round caps, as a gauge typically uses. The cap
+    /// centres sit on the stroke's centre line at each end of the sweep.
+    fn arc_round(start_deg: f32, sweep_deg: f32) -> super::super::ArcCommand {
+        let mut a = arc(start_deg, sweep_deg);
+        a.round_caps = true;
+        let mid = ((OUTER + INNER) / 2) as f32;
+        let at = |d: f32| {
+            let r = d.to_radians();
+            (
+                PhysicalLength::new((C as f32 + mid * r.cos()) as i16),
+                PhysicalLength::new((C as f32 + mid * r.sin()) as i16),
+            )
+        };
+        a.start_cap = at(start_deg);
+        a.end_cap = at(start_deg + sweep_deg);
+        a
+    }
+
+    /// Rgb565, not Rgb8: the interior of a span is filled by `blend_slice` while its end
+    /// pixels go through `blend_coverage`, and those two only round to different values once
+    /// the result is quantised to 5/6/5. An Rgb8 buffer hides the whole class of defect.
+    fn row_values(a: &super::super::ArcCommand, row: i16, from: usize, to: usize) -> Vec<u16> {
+        let span = PhysicalRect::new(euclid::point2(0, 0), euclid::size2(W as i16, W as i16));
+        let mut buf = vec![Rgb565Pixel(0); to - from];
+        draw_arc_line(&span, PhysicalLength::new(row), a, &mut buf, from as i16);
+        buf.iter().map(|p| p.0).collect()
+    }
+
+    /// Clipping must not change the *value* of any pixel, only which ones are offered.
+    ///
+    /// `clipped_drawing_matches_full_width` compares sets of painted indices with an
+    /// `r > 40` threshold, so it cannot see a pixel that is painted in both passes but with
+    /// different coverage. That is exactly the defect: the antialiased pixel at the edge of
+    /// a clipped window gets coverage measured against the window instead of against the
+    /// arc, and the one-step colour difference is left on the panel because nothing repaints
+    /// that pixel afterwards.
+    #[test]
+    fn clipped_drawing_matches_full_width_including_coverage() {
+        let mut failures = Vec::new();
+        for (start, sweep) in
+            [(140., 60.), (140., 200.), (330., 60.), (45., 90.), (0., 30.), (170., 20.), (90., 20.)]
+        {
+            for a in [arc(start, sweep), arc_round(start, sweep)] {
+                for row in [C - OUTER + 3, C - 120, C - 1, C, C + 1, C + 120, C + OUTER - 3] {
+                    let full = row_values(&a, row, 0, W);
+                    for from in [0usize, 100, 101, 200, 233, 300, 111] {
+                        for len in [1usize, 2, 7, 44, 120, 166] {
+                            let to = (from + len).min(W);
+                            if to <= from {
+                                continue;
+                            }
+                            let clipped = row_values(&a, row, from, to);
+                            for (i, px) in clipped.iter().enumerate() {
+                                if *px != full[from + i] {
+                                    failures.push(alloc::format!(
+                                        "start={start} sweep={sweep} caps={} row={row}                                          window={from}..{to} x={} clipped=0x{:04x} full=0x{:04x}",
+                                        a.round_caps,
+                                        from + i,
+                                        px,
+                                        full[from + i]
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} clipped pixels differ in value from the full-width pass; first 10:
+{}",
+            failures.len(),
+            failures.iter().take(10).cloned().collect::<Vec<_>>().join("
+")
+        );
+    }
+
+    fn contiguous_groups(xs: &[usize]) -> Vec<(usize, usize)> {
+        let mut out: Vec<(usize, usize)> = vec![];
+        for &x in xs {
+            match out.last_mut() {
+                Some(g) if x == g.1 + 1 => g.1 = x,
+                _ => out.push((x, x)),
+            }
+        }
+        out
+    }
+
+    /// The row through the centre crosses the hole, so a full ring must paint two runs
+    /// there and nothing between them.
+    #[test]
+    fn centre_row_of_a_full_ring_has_two_runs() {
+        let groups = contiguous_groups(&painted(&arc(0., 360.), C));
+        assert_eq!(groups.len(), 2, "expected a left and a right run, got {groups:?}");
+        assert!(groups[0].0 <= 1 && groups[0].1 >= 10, "left run {:?}", groups[0]);
+        assert!(groups[1].1 >= W - 2 && groups[1].0 <= W - 11, "right run {:?}", groups[1]);
+    }
+
+    /// 150..210 degrees is the 8 to 10 o'clock sector: the left run only, on every row
+    /// that passes through the hole.
+    #[test]
+    fn left_sector_paints_only_the_left_run() {
+        let a = arc(150., 60.);
+        for row in [C - 100, C - 20, C, C + 20, C + 100] {
+            let groups = contiguous_groups(&painted(&a, row));
+            assert!(!groups.is_empty(), "row {row}: nothing painted");
+            for g in &groups {
+                assert!(g.1 < C as usize, "row {row}: painted right of centre at {g:?}");
+            }
+        }
+    }
+
+    /// 330..30 degrees is 2 to 4 o'clock: the right run only.
+    #[test]
+    fn right_sector_paints_only_the_right_run() {
+        let a = arc(330., 60.);
+        for row in [C - 100, C - 20, C, C + 20, C + 100] {
+            let groups = contiguous_groups(&painted(&a, row));
+            assert!(!groups.is_empty(), "row {row}: nothing painted");
+            for g in &groups {
+                assert!(g.0 > C as usize, "row {row}: painted left of centre at {g:?}");
+            }
+        }
+    }
+
+    /// The row a boundary ray passes through must still be painted. An arc ending on the
+    /// horizontal has its outermost pixels on that row, and losing it shows as a nick at 3
+    /// or 9 o'clock. Both tips of a half turn arc live on it at once.
+    #[test]
+    fn the_row_a_horizontal_ray_passes_through_is_painted() {
+        // Sweeps that put a ray exactly on the horizontal, from either side.
+        for (start, sweep, expect_left, expect_right) in [
+            (0., 90., false, true),    // starts at 3 o'clock, sweeps down
+            (270., 90., false, true),  // ends at 3 o'clock
+            (180., 90., true, false),  // starts at 9 o'clock
+            (90., 90., true, false),   // ends at 9 o'clock
+            (180., 180., true, true),  // both tips on the row
+            (0., 180., true, true),
+        ] {
+            let a = arc(start, sweep);
+            // The exact horizontal falls between the rows at dy = -0.5 and +0.5, so the tip
+            // legitimately sits on one or the other depending on which way the arc sweeps.
+            // What must not happen is it being missing from both.
+            let mut groups = contiguous_groups(&painted(&a, C - 1));
+            groups.extend(contiguous_groups(&painted(&a, C)));
+            let has_left = groups.iter().any(|g| g.1 < C as usize);
+            let has_right = groups.iter().any(|g| g.0 > C as usize);
+            assert!(
+                has_left == expect_left && has_right == expect_right,
+                "start={start} sweep={sweep}: left={has_left} right={has_right},                  wanted left={expect_left} right={expect_right} (groups {groups:?})"
+            );
+        }
+    }
+
+    /// Nothing may be painted outside the sector. The tests above only check that rows are
+    /// not skipped, which cannot see over-painting - and a reflex sweep takes the union of
+    /// two half planes, where painting outside the wedge is the natural way to be wrong.
+    /// A dial spanning 140..400 degrees leaves a gap around 6 o'clock, so anything drawn
+    /// there is arc where there is meant to be none.
+    #[test]
+    fn nothing_is_painted_outside_the_sector() {
+        for (start, sweep) in [(140., 260.), (140., 200.), (140., 190.), (150., 60.), (0., 359.)] {
+            let a = arc(start, sweep);
+            let mut bad = vec![];
+            for row in (C - OUTER + 1)..(C + OUTER - 1) {
+                for x in painted(&a, row) {
+                    let dx = x as f32 + 0.5 - C as f32;
+                    let dy = row as f32 + 0.5 - C as f32;
+                    let r = (dx * dx + dy * dy).sqrt();
+                    // Ignore the anti-aliased fringe just outside the ring's radii.
+                    if r < INNER as f32 - 1.5 || r > OUTER as f32 + 1.5 {
+                        continue;
+                    }
+                    let ang = dy.atan2(dx).to_degrees();
+                    // Rotation from the sweep's start, allowing a couple of degrees for
+                    // the caps and anti-aliasing at each end.
+                    let rel = (ang - start).rem_euclid(360.);
+                    if rel > sweep + 3. && rel < 360. - 3. {
+                        bad.push((x, row, rel as i32));
+                    }
+                }
+            }
+            assert!(
+                bad.is_empty(),
+                "start={start} sweep={sweep}: {} px painted outside the sector, e.g. {:?}",
+                bad.len(),
+                &bad[..bad.len().min(6)]
+            );
+        }
+    }
+
+    /// Every row the ring covers must be painted somewhere, for sectors sitting on each
+    /// horizontal axis and for a reflex sweep spanning both.
+    #[test]
+    fn no_row_of_a_sector_is_skipped() {
+        for (start, sweep) in [(150., 60.), (330., 60.), (140., 260.), (140., 200.)] {
+            let a = arc(start, sweep);
+            let mut blank = vec![];
+            for row in (C - OUTER + 1)..(C + OUTER - 1) {
+                // Rows the sector genuinely does not reach are not a failure; only look at
+                // rows where some angle in the sweep has that y.
+                let reaches = (0..=(sweep as i32)).any(|k| {
+                    let ang = (start + k as f32).to_radians();
+                    let y = C as f32 + (INNER as f32 + 6.) * ang.sin();
+                    (y.round() as i16 - row).abs() <= 1
+                });
+                if reaches && painted(&a, row).is_empty() {
+                    blank.push(row);
+                }
+            }
+            assert!(blank.is_empty(), "start={start} sweep={sweep}: unpainted rows {blank:?}");
+        }
+    }
+}
+
 pub trait TargetPixel: Sized + Copy {
     /// Blend a single pixel with a color
     fn blend(&mut self, color: PremultipliedRgbaColor);
