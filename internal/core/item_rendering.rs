@@ -195,21 +195,6 @@ impl<T> ItemCache<T> {
 /// Diagnostic hook: counts items visited and items actually drawn during the render walk,
 /// so the payoff of pruning scrolled-out subtrees can be sized before anyone writes it.
 /// The firmware supplies the counter; on any other target this compiles to nothing.
-#[allow(unsafe_code)]
-mod walk_mark {
-    #[cfg(target_arch = "xtensa")]
-    unsafe extern "C" {
-        fn slint_esp_phase_mark(phase: u32);
-    }
-
-    #[cfg(target_arch = "xtensa")]
-    pub fn mark(phase: u32) {
-        unsafe { slint_esp_phase_mark(phase) }
-    }
-
-    #[cfg(not(target_arch = "xtensa"))]
-    pub fn mark(_phase: u32) { }
-}
 
 /// How far outside its own geometry an item may paint, in logical pixels.
 ///
@@ -247,11 +232,7 @@ pub fn render_item_children(
                 }
             }
 
-            walk_mark::mark(9);
             let (do_draw, item_geometry) = renderer.filter_item(&item_rc, window_adapter);
-            if do_draw {
-                walk_mark::mark(10);
-            }
 
             let item_origin = item_geometry.origin;
             renderer.translate(item_origin.to_vector());
