@@ -1529,11 +1529,34 @@ fn render_window_frame_by_line(
     scene.dirty_region
 }
 
+
+/// Diagnostic hook so the firmware can time the phases inside `prepare_scene`.
+///
+/// The frame-rate floor on MCU targets is set by prepare, not by how much is dirty, and
+/// static analysis has never accounted for most of it. The firmware supplies the clock; on
+/// any other target this compiles to nothing.
+#[allow(unsafe_code)]
+mod phase_mark {
+    #[cfg(target_arch = "xtensa")]
+    unsafe extern "C" {
+        fn slint_esp_phase_mark(phase: u32);
+    }
+
+    #[cfg(target_arch = "xtensa")]
+    pub fn mark(phase: u32) {
+        unsafe { slint_esp_phase_mark(phase) }
+    }
+
+    #[cfg(not(target_arch = "xtensa"))]
+    pub fn mark(_phase: u32) { }
+}
+
 fn prepare_scene(
     window: &WindowInner,
     size: PhysicalSize,
     software_renderer: &SoftwareRenderer,
 ) -> Scene {
+    phase_mark::mark(0);
     let factor = ScaleFactor::new(window.scale_factor());
     let prepare_scene = SceneBuilder::new(
         size,
@@ -1597,6 +1620,7 @@ fn prepare_scene(
         };
         drop(i);
 
+        phase_mark::mark(1);
         let partial = software_renderer.repaint_buffer_type.get() != RepaintBufferType::NewBuffer;
         for (component, origin) in components {
             if let Some(component) = ItemTreeWeak::upgrade(component) {
@@ -1609,6 +1633,7 @@ fn prepare_scene(
             }
         }
 
+        phase_mark::mark(2);
         if partial {
             post_render(&mut renderer);
         } else {
@@ -1638,7 +1663,10 @@ fn prepare_scene(
         )
     } // */
 
-    Scene::new(prepare_scene.processor.items, prepare_scene.processor.vectors, dirty_region)
+    phase_mark::mark(3);
+    let scene = Scene::new(prepare_scene.processor.items, prepare_scene.processor.vectors, dirty_region);
+    phase_mark::mark(4);
+    scene
 }
 
 trait ProcessScene {
