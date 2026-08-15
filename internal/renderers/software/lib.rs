@@ -2398,10 +2398,12 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         path: Pin<&i_slint_core::items::Path>,
         geom: &LogicalRect,
     ) -> bool {
-        // Only a plain stroke is expressible as a ring. A fill, or a rotated screen, goes
-        // through the general path so nothing is silently drawn wrong.
-        if !path.fill().is_transparent() || self.rotation.orientation != RenderingRotation::NoRotation
-        {
+        // Only a plain stroke is expressible as a ring. A fill goes through the general path
+        // so nothing is silently drawn wrong. Rotation is handled below: a circle is
+        // rotation-invariant, so a rotated arc is still an arc about a transformed centre with
+        // its start angle shifted, and going through the general path instead would hand the
+        // zeno rasteriser a full-panel path whose scratch frame overflows even a 48KB stack.
+        if !path.fill().is_transparent() {
             return false;
         }
         let stroke_brush = path.stroke();
@@ -2428,8 +2430,18 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         let physical_geom_f32 =
             geom.translate(self.current_state.offset.to_vector()).cast() * self.scale_factor;
         let origin = physical_geom_f32.round().origin;
-        let center_x = origin.x + path.arc_center_x().get() * scale;
-        let center_y = origin.y + path.arc_center_y().get() * scale;
+        // A rotation maps the ring to another ring: transform the centre and shift the start
+        // angle by the rotation, leaving radius, stroke and sweep untouched. The point
+        // transform is the renderer's own, so the convention matches every other primitive -
+        // Rotate90 sends (dx,dy) to (-dy,dx), which is +90 degrees clockwise in screen
+        // coordinates, exactly what `angle()` reports.
+        let center_unrotated = euclid::Point2D::<f32, PhysicalPx>::new(
+            origin.x + path.arc_center_x().get() * scale,
+            origin.y + path.arc_center_y().get() * scale,
+        );
+        let center = center_unrotated.transformed(self.rotation);
+        let center_x = center.x;
+        let center_y = center.y;
         let bounds = PhysicalRect::new(
             euclid::point2((center_x - outer).floor() as i16, (center_y - outer).floor() as i16),
             euclid::size2((outer * 2.).ceil() as i16 + 2, (outer * 2.).ceil() as i16 + 2),
@@ -2438,14 +2450,15 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             .cast()
             * self.scale_factor)
             .round()
-            .cast::<i16>();
+            .cast::<i16>()
+            .transformed(self.rotation);
         let Some(clipped) = bounds.intersection(&physical_clip) else {
             return true;
         };
 
         // Slint angles run clockwise from 3 o'clock, which is also the screen's sense
         // because y grows downward, so the direction vectors need no flip.
-        let start = path.arc_start_angle().to_radians();
+        let start = (path.arc_start_angle() + self.rotation.orientation.angle()).to_radians();
         let sweep = path.arc_sweep_angle();
         let end = start + sweep.to_radians();
         let unit = |a: f32| -> (f32, f32) {
