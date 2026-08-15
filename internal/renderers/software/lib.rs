@@ -1648,10 +1648,10 @@ fn prepare_scene(
                 unsafe {
                     slint_esp_debug_rect(
                         3,
-                        r.origin.x as i32,
-                        r.origin.y as i32,
-                        r.size.width as i32,
-                        r.size.height as i32,
+                        r.min.x as i32,
+                        r.min.y as i32,
+                        r.width() as i32,
+                        r.height() as i32,
                     )
                 };
             }
