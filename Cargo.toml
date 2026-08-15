@@ -176,6 +176,15 @@ lsp-types = "0.95.0"
 [profile.release]
 panic = "abort"
 
+# The MCU target executes this from flash in DIO mode at 80MHz - roughly 20MB/s of
+# instruction fetch - through a 32KB instruction cache. Profiling the item-tree walk there
+# measured ~200us per item across only 71 items, which is ~24KB of distinct code touched per
+# item: the cache is thrashing, not the ALU. So for the crate that owns the walk, smaller
+# code is faster code. The software renderer keeps opt-level 3 because its inner loops are
+# genuinely compute-bound and run per pixel.
+[profile.release.package.i-slint-core]
+opt-level = "s"
+
 
 # Always build resvg and its hot-path dependencies with optimizations,
 # as it otherwise causes freezes to load large SVGs in debug builds.
