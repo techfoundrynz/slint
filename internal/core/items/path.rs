@@ -303,6 +303,9 @@ struct ArcSnapshotCell {
 /// `bounds_cover_what_the_renderer_actually_paints` pins the bound at 5; this keeps 1 spare.
 const ARC_BAND_SLACK: Coord = 6 as Coord;
 
+/// Diagnostic switch: when true every arc change invalidates the whole element.
+const ARC_NO_NARROWING: bool = true;
+
 impl Path {
     /// The region to invalidate when this Path is dirty, if a narrower one than the whole
     /// element can be justified.
@@ -313,6 +316,14 @@ impl Path {
     /// and the caller invalidates the full bounding rect. Under-invalidating here leaves
     /// stale pixels on screen indefinitely, so the comparison is deliberately total.
     pub fn arc_dirty_rect(self: Pin<&Self>, geometry: LogicalRect) -> Option<LogicalRect> {
+        // DIAGNOSTIC: narrowing disabled. Returning None makes the caller invalidate the whole
+        // element for any arc change, which is always correct but repaints far more. Splits the
+        // arc-artifact hunt in half - if fragments survive this, invalidation coverage is not
+        // the cause and the fault is in drawing or the flush.
+        if ARC_NO_NARROWING {
+            let _ = geometry;
+            return None;
+        }
         let Some(now) = self.arc_snapshot_now(geometry.size) else {
             return None;
         };
