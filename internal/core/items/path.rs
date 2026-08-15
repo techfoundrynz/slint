@@ -418,9 +418,12 @@ impl Path {
         // Carry the previous frame's band forward once. See `prev_band`.
         let prev = self.arc_snapshot.prev_band.replace(pending);
         let owed = if prev.is_empty() { pending } else { pending.union(&prev) };
-        let out = owed
-            .inflate(ARC_BAND_SLACK, ARC_BAND_SLACK)
-            .translate(geometry.origin.to_vector());
+        // Deliberately NOT translated by geometry.origin. The caller marks this with the same
+        // transform it uses for the item's own bounding rect, and that transform already
+        // carries the item's offset - translating here counted it twice. The outer gauge sits
+        // at the origin so it hid the bug; the inner one is inset 31px and was having a region
+        // 31px away from its arc repainted, which is where the gaps came from.
+        let out = owed.inflate(ARC_BAND_SLACK, ARC_BAND_SLACK);
         // tag 1: the band this frame owes, in parent space.
         debug_rect::emit(1, out.origin.x, out.origin.y, out.size.width, out.size.height);
         // tag 2: how far each end moved, so a large delta with a small band is visible.
