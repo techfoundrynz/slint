@@ -362,7 +362,7 @@ mod software_renderer {
     use i_slint_core::SharedVector;
     use i_slint_core::graphics::{IntRect, Rgb8Pixel};
     use i_slint_renderer_software::{
-        PhysicalRegion, RepaintBufferType, Rgb565Pixel, SoftwareRenderer,
+        PhysicalRegion, RepaintBufferType, Rgb565BigEndianPixel, Rgb565Pixel, SoftwareRenderer,
     };
 
     #[cfg(feature = "experimental")]
@@ -680,6 +680,27 @@ mod software_renderer {
             usize,
             usize,
             extern "C" fn(*const core::ffi::c_void, *mut Rgb565Pixel, usize),
+            *const core::ffi::c_void,
+        ),
+        user_data: *mut core::ffi::c_void,
+    ) -> PhysicalRegion {
+        let renderer = unsafe { &*(r as *const SoftwareRenderer) };
+        let processor = LineByLineProcessor { process_line_fn, user_data };
+        renderer.render_by_line(processor)
+    }
+
+    /// Renders line by line into big-endian RGB565, the byte order SPI/QSPI panels expect.
+    /// Rendering straight into it lets a platform skip a full-frame byte swap, which on a
+    /// 466x466 panel is ~3.9ms per fully-dirty frame even with a 32-bit unrolled swap loop.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn slint_software_renderer_render_by_line_rgb565be(
+        r: SoftwareRendererOpaque,
+        process_line_fn: extern "C" fn(
+            *mut core::ffi::c_void,
+            usize,
+            usize,
+            usize,
+            extern "C" fn(*const core::ffi::c_void, *mut Rgb565BigEndianPixel, usize),
             *const core::ffi::c_void,
         ),
         user_data: *mut core::ffi::c_void,
