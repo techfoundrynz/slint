@@ -424,6 +424,19 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                         let old_geom = cached_geom.clone();
 
                         let geometry_changed = old_geom != new_geom;
+
+                        // Evaluated on every visit, not only when the narrowed region is
+                        // usable: this call is what advances the arc's snapshot, and a later
+                        // difference measured from a stale one would skip what came between.
+                        // Reads the arc's properties, so it must not register them against the
+                        // binding being evaluated - as for the geometry above.
+                        #[cfg(feature = "path")]
+                        let arc_narrowed = crate::properties::evaluate_no_tracking(|| {
+                            ItemRef::downcast_pin::<crate::items::Path>(item)
+                                .and_then(|p| p.arc_dirty_rect(*new_geom.bounding_rect()))
+                        });
+                        #[cfg(not(feature = "path"))]
+                        let arc_narrowed: Option<LogicalRect> = None;
                         if ItemRef::downcast_pin::<Clip>(item).is_some()
                             || ItemRef::downcast_pin::<Opacity>(item).is_some()
                         {
@@ -468,8 +481,12 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                             || new_state.transform_to_screen != new_state.old_transform_to_screen;
 
                         if rendering_dirty {
+                            // An arc whose sweep is all that changed only needs the swept
+                            // difference repainted, not the whole element it fills.
+                            let narrowed = if moved { None } else { arc_narrowed };
+
                             self.mark_dirty_rect(
-                                cached_geom.bounding_rect(),
+                                narrowed.as_ref().unwrap_or(cached_geom.bounding_rect()),
                                 state.transform_to_screen,
                                 &state.clipped,
                             );
@@ -494,7 +511,7 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                     state.transform_to_screen,
                                     &state.clipped,
                                 );
-                            } else if let Some(tr) = &tracker {
+                                } else if let Some(tr) = &tracker {
                                 tr.as_ref().register_as_dependency_to_current_binding();
                             }
 
