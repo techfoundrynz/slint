@@ -172,33 +172,6 @@ impl Item for Path {
 
 
 
-/// Diagnostic: report each arc's previous and current ends so consecutive frames can be
-/// checked for continuity. If `now` on one frame is not `before` on the next, the band
-/// between them was never owed by anyone.
-#[allow(unsafe_code)]
-mod arc_trace {
-    #[cfg(target_arch = "xtensa")]
-    unsafe extern "C" {
-        fn slint_esp_debug_rect(tag: u32, x: i32, y: i32, w: i32, h: i32);
-    }
-
-    #[cfg(target_arch = "xtensa")]
-    pub fn ends(radius: f32, before_end: f32, now_end: f32, marked: bool) {
-        unsafe {
-            slint_esp_debug_rect(
-                if marked { 5 } else { 4 },
-                radius as i32,
-                (before_end * 10.) as i32,
-                (now_end * 10.) as i32,
-                0,
-            )
-        }
-    }
-
-    #[cfg(not(target_arch = "xtensa"))]
-    pub fn ends(_radius: f32, _before_end: f32, _now_end: f32, _marked: bool) { }
-}
-
 impl Path {
     /// Returns an iterator of the events of the path and an offset, so that the
     /// shape fits into the width/height of the path while respecting the stroke
@@ -341,7 +314,14 @@ struct ArcSnapshotCell {
 const ARC_BAND_SLACK: Coord = 6 as Coord;
 
 /// Diagnostic switch: when true every arc change invalidates the whole element.
-const ARC_NO_NARROWING: bool = false;
+/// Arc narrowing is off.
+///
+/// Narrowing is correct as far as anything could be measured - band continuity is unbroken
+/// across consecutive frames, band position matches the repainted region exactly, coverage
+/// survives a 30px slack, and `clipped_drawing_matches_full_width` proves the rasteriser
+/// paints identically clipped or not - and yet the panel still showed gaps in a moving arc
+/// while full invalidation was always clean. Until that is explained, correctness wins.
+const ARC_NO_NARROWING: bool = true;
 
 impl Path {
     /// The region to invalidate when this Path is dirty, if a narrower one than the whole
@@ -434,7 +414,6 @@ impl Path {
         // at the origin so it hid the bug; the inner one is inset 31px and was having a region
         // 31px away from its arc repainted, which is where the gaps came from.
         let out = owed.inflate(ARC_BAND_SLACK, ARC_BAND_SLACK);
-        arc_trace::ends(now.radius, before.start + before.sweep, now.start + now.sweep, true);
         Some(out)
     }
 

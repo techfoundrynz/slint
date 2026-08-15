@@ -1170,6 +1170,61 @@ mod arc_line_tests {
         buf.iter().enumerate().filter(|(_, p)| p.r > 40).map(|(i, _)| i).collect()
     }
 
+    /// Painted x positions on one row when the buffer covers only [from, to) of the span,
+    /// which is what a narrowed dirty region hands over.
+    fn painted_clipped(
+        a: &super::super::ArcCommand,
+        row: i16,
+        from: usize,
+        to: usize,
+    ) -> Vec<usize> {
+        let span = PhysicalRect::new(euclid::point2(0, 0), euclid::size2(W as i16, W as i16));
+        let mut buf = vec![Rgb8Pixel { r: 0, g: 0, b: 0 }; to - from];
+        draw_arc_line(&span, PhysicalLength::new(row), a, &mut buf, from as i16);
+        buf.iter().enumerate().filter(|(_, p)| p.r > 40).map(|(i, _)| i + from).collect()
+    }
+
+    /// Drawing clipped to a narrow window must paint exactly what the full-width pass paints
+    /// inside that window.
+    ///
+    /// This is the difference between a narrowed dirty region and a full-element one, and it
+    /// is invisible on a full repaint: any pixel the clipped pass drops is simply left as the
+    /// previous frame had it, which reads as a gap in the arc that repairs itself later.
+    #[test]
+    fn clipped_drawing_matches_full_width() {
+        for (start, sweep) in [
+            (140., 60.),
+            (140., 200.),
+            (330., 60.),
+            (45., 90.),
+            (0., 30.),
+            (170., 20.),
+        ] {
+            let a = arc(start, sweep);
+            for row in [C - OUTER + 3, C - 120, C - 1, C, C + 1, C + 120, C + OUTER - 3] {
+                let full = painted(&a, row);
+                // Windows deliberately cutting through the arc, including odd edges.
+                for &(from, to) in &[
+                    (0usize, 120usize),
+                    (100, 240),
+                    (101, 241),
+                    (200, 300),
+                    (233, 400),
+                    (300, 466),
+                    (111, 355),
+                ] {
+                    let clipped = painted_clipped(&a, row, from, to);
+                    let expect: Vec<usize> =
+                        full.iter().copied().filter(|x| *x >= from && *x < to).collect();
+                    assert_eq!(
+                        clipped, expect,
+                        "start={start} sweep={sweep} row={row} window={from}..{to}"
+                    );
+                }
+            }
+        }
+    }
+
     fn contiguous_groups(xs: &[usize]) -> Vec<(usize, usize)> {
         let mut out: Vec<(usize, usize)> = vec![];
         for &x in xs {
