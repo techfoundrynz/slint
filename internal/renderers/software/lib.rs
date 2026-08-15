@@ -647,13 +647,13 @@ impl SoftwareRenderer {
                 let rotation = RotationInfo { orientation: rotation, screen_size: size };
                 let screen_rect = PhysicalRect::from_size(size);
                 let mut i = renderer.dirty_region.iter().filter_map(|r| {
-                    (r.cast() * factor)
+                    let r = (r.cast() * factor)
                         .to_rect()
                         .round_out()
                         .cast()
                         .intersection(&screen_rect)?
-                        .transformed(rotation)
-                        .into()
+                        .transformed(rotation);
+                    Some(even_aligned(r, &screen_rect))
                 });
                 let dirty_region = PhysicalRegion {
                     rectangles: core::array::from_fn(|_| i.next().unwrap_or_default().to_box2d()),
@@ -1372,6 +1372,29 @@ fn parley_disabled() -> bool {
     false
 }
 
+/// Rounds a dirty rectangle outward so both edges land on an even coordinate, clamped to the
+/// screen.
+///
+/// Panels in this class (SH8601, CO5300 and the other QSPI AMOLED controllers) require every
+/// coordinate of a draw window to be even; the vendor drivers say so and LVGL carried a
+/// rounder callback to enforce it. A full-screen flush satisfies that by accident, because it
+/// starts at row 0 and advances by a whole chunk, so the requirement went unnoticed until
+/// partial repaint started handing over regions that begin on whatever row the damage does.
+///
+/// Rounding here rather than in the driver matters: this widens the region *before* the scene
+/// is rendered, so the renderer actually paints the added row and column. A driver that widens
+/// its window afterwards has to invent those pixels, and at the edge of a dirty band the
+/// invented pixel sits outside the region and is never repainted.
+fn even_aligned(r: PhysicalRect, screen: &PhysicalRect) -> PhysicalRect {
+    let x0 = r.min_x() & !1;
+    let y0 = r.min_y() & !1;
+    let x1 = (r.max_x() + 1) & !1;
+    let y1 = (r.max_y() + 1) & !1;
+    PhysicalRect::new(euclid::point2(x0, y0), euclid::size2(x1 - x0, y1 - y0))
+        .intersection(screen)
+        .unwrap_or(r)
+}
+
 fn render_window_frame_by_line(
     window: &WindowInner,
     background: Brush,
@@ -1594,19 +1617,16 @@ fn prepare_scene(
         // extends one, and the error persists until some later region happens to cover it.
         // Handing out even bounds costs at most two pixels a rect and removes the problem at
         // the source, since the renderer then actually draws every pixel it hands over.
-        let snap_even = |r: PhysicalRect| -> PhysicalRect {
-            let x0 = r.origin.x & !1;
-            let x1 = (r.origin.x + r.size.width + 1) & !1;
-            PhysicalRect::new(
-                euclid::point2(x0, r.origin.y),
-                euclid::size2(x1 - x0, r.size.height),
-            )
-        };
         let mut i = renderer.dirty_region.iter().filter_map(|r| {
-            snap_even((r.cast() * factor).to_rect().round_out().cast())
+            // After the rotation, not before: the alignment the panel needs is on the
+            // coordinates the draw window is expressed in, which are screen space.
+            let r = (r.cast() * factor)
+                .to_rect()
+                .round_out()
+                .cast()
                 .intersection(&screen_rect)?
-                .transformed(rotation)
-                .into()
+                .transformed(rotation);
+            Some(even_aligned(r, &screen_rect))
         });
         dirty_region = PhysicalRegion {
             rectangles: core::array::from_fn(|_| i.next().unwrap_or_default().to_box2d()),

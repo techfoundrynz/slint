@@ -294,6 +294,29 @@ fn run<P: TestPixel>(
         });
         partial_lines.push(lines_p);
 
+        // The panel needs every draw-window coordinate even, so the region handed to the
+        // firmware has to be even on both axes. x is visible directly in the ranges; y shows
+        // up as the runs of consecutive lines, which must start even and have an even length.
+        for (l, r) in &touched_p {
+            assert_eq!(r.start % 2, 0, "odd range start {} on line {l} at step {step}", r.start);
+            assert_eq!(r.end % 2, 0, "odd range end {} on line {l} at step {step}", r.end);
+        }
+        let mut lines: Vec<usize> = touched_p.iter().map(|(l, _)| *l).collect();
+        lines.sort_unstable();
+        lines.dedup();
+        let mut i = 0;
+        while i < lines.len() {
+            let start = lines[i];
+            let mut end = start;
+            while i + 1 < lines.len() && lines[i + 1] == end + 1 {
+                i += 1;
+                end = lines[i];
+            }
+            i += 1;
+            assert_eq!(start % 2, 0, "line run {start}..={end} starts odd at step {step}");
+            assert_eq!((end - start + 1) % 2, 0, "line run {start}..={end} has odd height at step {step}");
+        }
+
         if let Some(diff) = compare(&buf_p, &buf_f) {
             let first = diff.first;
             let rng = |t: &Vec<(usize, core::ops::Range<usize>)>| {
