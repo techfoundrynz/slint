@@ -18,9 +18,14 @@ xtask = "run --locked --package xtask --"
 rustflags = [
   "-C",
   "link-arg=-nostartfiles",
+  # Upstream disables the FPU here, per the comment below, because of an Xtensa LLVM
+  # miscompilation that corrupts the clipping region. We leave it enabled: the software
+  # renderer is float-saturated and soft-float costs several times the frame budget on
+  # this target. Restore these two lines to A/B it if clipping or partial-repaint
+  # artifacts ever show up.
   # Without this flag, we get miscompilation of floating point operations that cause the clipping region to be totally wrong
-  "-C",
-  "target-feature=-fp",
+  #   "-C",
+  #   "target-feature=-fp",
 ]
 
 [target.xtensa-esp32s2-none-elf]
