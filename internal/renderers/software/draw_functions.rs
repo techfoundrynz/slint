@@ -441,16 +441,40 @@ pub(super) fn draw_arc_line(
                 cdx * cdx + cdy * cdy <= h * h
             })
         };
+        // Sweep the ring runs *and* the cap discs. Iterating the runs alone, and applying the
+        // run clip before the cap test, made a cap pixel lying outside the ring's radial run
+        // on this row unpaintable - a nick at the sweep tip whenever it passes 3 or 9 o'clock,
+        // which is exactly where these rows exist. The run clip belongs to the ring test only.
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
         for run in runs.iter().take(run_count) {
-            let from = run.0.max(0.).floor() as i32;
-            let to = (run.1.min(width as f32).ceil() as i32).min(width);
+            lo = lo.min(run.0);
+            hi = hi.max(run.1);
+        }
+        if arc.round_caps {
+            let h = arc.cap_radius.get() as f32;
+            for cap in [arc.start_cap, arc.end_cap] {
+                let ccx = (cap.0.get() - extra_left_clip) as f32;
+                let cdy = dy - (cap.1.get() - arc.center_y.get()) as f32;
+                let half_chord = h * h - cdy * cdy;
+                if half_chord > 0. {
+                    let half_chord = Float::sqrt(half_chord);
+                    lo = lo.min(ccx - half_chord);
+                    hi = hi.max(ccx + half_chord);
+                }
+            }
+        }
+        if hi > lo {
+            let from = lo.max(0.).floor() as i32;
+            let to = (hi.min(width as f32).ceil() as i32).min(width);
             for x in from..to {
                 let px = x as f32 + 0.5;
-                if px < run.0 || px > run.1 {
-                    continue;
-                }
                 let dx = px - cx;
-                if inside(dx) || cap_covers(dx) {
+                let in_ring = runs
+                    .iter()
+                    .take(run_count)
+                    .any(|run| px >= run.0 && px <= run.1);
+                if (in_ring && inside(dx)) || cap_covers(dx) {
                     line_buffer[x as usize].blend(arc.color);
                 }
             }
