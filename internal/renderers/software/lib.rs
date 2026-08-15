@@ -1535,6 +1535,14 @@ fn render_window_frame_by_line(
 /// The frame-rate floor on MCU targets is set by prepare, not by how much is dirty, and
 /// static analysis has never accounted for most of it. The firmware supplies the clock; on
 /// any other target this compiles to nothing.
+/// Emits the closing text mark however `draw_text` returns.
+struct TextDrawGuard;
+impl Drop for TextDrawGuard {
+    fn drop(&mut self) {
+        phase_mark::mark(8);
+    }
+}
+
 #[allow(unsafe_code)]
 mod phase_mark {
     #[cfg(target_arch = "xtensa")]
@@ -3082,6 +3090,8 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         size: LogicalSize,
         _cache: &CachedRenderingData,
     ) {
+        phase_mark::mark(7);
+        let _text_guard = TextDrawGuard;
         let font_request = text.font_request(self_rc);
 
         #[cfg(feature = "systemfonts")]
