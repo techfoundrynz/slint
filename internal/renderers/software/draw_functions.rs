@@ -270,15 +270,32 @@ pub(super) fn draw_texture_line(
                 }
             }
             TexturePixelFormat::AlphaMap => {
-                for pix in line_buffer {
-                    let pos = pos(1).0;
-                    let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
-                        ((data[pos] as u16 * alpha as u16) / 255) as u8,
-                        color.red(),
-                        color.green(),
-                        color.blue(),
-                    ));
-                    pix.blend(c);
+                // Hottest loop on any screen with text: the colour channels are
+                // loop-invariant, and at full alpha the coverage scaling collapses to a read.
+                let (cr, cg, cb) = (color.red(), color.green(), color.blue());
+                if alpha == 0xff {
+                    for pix in line_buffer {
+                        let pos = pos(1).0;
+                        let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
+                            data[pos],
+                            cr,
+                            cg,
+                            cb,
+                        ));
+                        pix.blend(c);
+                    }
+                } else {
+                    let a = alpha as u16;
+                    for pix in line_buffer {
+                        let pos = pos(1).0;
+                        let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
+                            ((data[pos] as u16 * a) / 255) as u8,
+                            cr,
+                            cg,
+                            cb,
+                        ));
+                        pix.blend(c);
+                    }
                 }
             }
             TexturePixelFormat::SignedDistanceField => {
@@ -1501,6 +1518,23 @@ impl Rgb565Pixel {
 }
 
 impl TargetPixel for Rgb565Pixel {
+    /// Opaque fills are most of the pixels in a frame, and the default `slice.fill` lowers to
+    /// a non-unrolled 16-bit store loop on Xtensa. Pairing the pixels into 32-bit stores
+    /// halves the store count for the aligned middle.
+    fn blend_slice(slice: &mut [Self], color: PremultipliedRgbaColor) {
+        if color.alpha == u8::MAX {
+            let p = Self::from_rgb(color.red, color.green, color.blue);
+            let (head, mid, tail) = bytemuck::pod_align_to_mut::<Self, u32>(slice);
+            head.fill(p);
+            mid.fill((p.0 as u32) | ((p.0 as u32) << 16));
+            tail.fill(p);
+        } else {
+            for x in slice {
+                Self::blend(x, color);
+            }
+        }
+    }
+
     fn blend(&mut self, color: PremultipliedRgbaColor) {
         let a = (u8::MAX - color.alpha) as u32;
         // convert to 5 bits
@@ -1524,6 +1558,46 @@ impl TargetPixel for Rgb565Pixel {
 
     fn from_rgb(r: u8, g: u8, b: u8) -> Self {
         Self(((r as u16 & 0b11111000) << 8) | ((g as u16 & 0b11111100) << 3) | (b as u16 >> 3))
+    }
+}
+
+#[cfg(test)]
+mod rgb565_fill_tests {
+    use super::*;
+    use alloc::vec;
+
+    /// The widened fill writes the aligned middle as 32-bit pairs, so it has to agree with a
+    /// plain per-pixel fill at every start offset and length - including the odd head and tail
+    /// that fall outside the pairing.
+    #[test]
+    fn widened_opaque_fill_matches_per_pixel() {
+        let opaque = |r, g, b| PremultipliedRgbaColor { red: r, green: g, blue: b, alpha: 255 };
+        for color in [opaque(0, 0, 0), opaque(255, 255, 255), opaque(31, 200, 97)] {
+            let want = Rgb565Pixel::from_rgb(color.red, color.green, color.blue);
+            for len in 0..24usize {
+                for off in 0..4usize {
+                    let mut buf = vec![Rgb565Pixel(0xdead); off + len];
+                    Rgb565Pixel::blend_slice(&mut buf[off..], color);
+                    for (i, px) in buf.iter().enumerate() {
+                        let expect = if i < off { Rgb565Pixel(0xdead) } else { want };
+                        assert_eq!(*px, expect, "color={color:?} len={len} off={off} i={i}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Translucent colours must still go through the per-pixel blend.
+    #[test]
+    fn translucent_fill_still_blends() {
+        let c = PremultipliedRgbaColor { red: 40, green: 40, blue: 40, alpha: 128 };
+        let mut widened = vec![Rgb565Pixel(0x1234); 9];
+        let mut manual = widened.clone();
+        Rgb565Pixel::blend_slice(&mut widened, c);
+        for px in manual.iter_mut() {
+            px.blend(c);
+        }
+        assert_eq!(widened, manual);
     }
 }
 
@@ -1573,6 +1647,22 @@ impl Rgb565BigEndianPixel {
 }
 
 impl TargetPixel for Rgb565BigEndianPixel {
+    /// Same widening as the native-endian case: the fill value is byte-swapped once up
+    /// front, so pairing pixels into 32-bit stores costs nothing extra here.
+    fn blend_slice(slice: &mut [Self], color: PremultipliedRgbaColor) {
+        if color.alpha == u8::MAX {
+            let p = Self::from_rgb(color.red, color.green, color.blue);
+            let (head, mid, tail) = bytemuck::pod_align_to_mut::<Self, u32>(slice);
+            head.fill(p);
+            mid.fill((p.0 as u32) | ((p.0 as u32) << 16));
+            tail.fill(p);
+        } else {
+            for x in slice {
+                Self::blend(x, color);
+            }
+        }
+    }
+
     fn blend(&mut self, color: PremultipliedRgbaColor) {
         // Reuse the canonical native-endian Rgb565Pixel::blend by decoding
         // from BE byte order, blending, and re-encoding. On targets with a

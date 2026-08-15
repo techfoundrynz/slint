@@ -1870,6 +1870,13 @@ fn process_rectangle_impl(
         }
     }
 
+    // A fully transparent fill with no border paints nothing, but still costs one
+    // rounded-rectangle span call per covered line. Layout and TouchArea wrappers are
+    // routinely rectangles like this, so the calls add up across a full-screen repaint.
+    if color.alpha == 0 && border.get() == 0 {
+        return;
+    }
+
     let radius = PhysicalBorderRadius {
         top_left: args.top_left_radius as _,
         top_right: args.top_right_radius as _,
