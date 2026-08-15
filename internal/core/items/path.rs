@@ -171,22 +171,32 @@ impl Item for Path {
 }
 
 
-/// Diagnostic: emit a rectangle to the firmware so the band this computes can be compared
-/// against the dirty region the frame actually repaints. Compiles to nothing off-Xtensa.
+
+/// Diagnostic: report each arc's previous and current ends so consecutive frames can be
+/// checked for continuity. If `now` on one frame is not `before` on the next, the band
+/// between them was never owed by anyone.
 #[allow(unsafe_code)]
-mod debug_rect {
+mod arc_trace {
     #[cfg(target_arch = "xtensa")]
     unsafe extern "C" {
         fn slint_esp_debug_rect(tag: u32, x: i32, y: i32, w: i32, h: i32);
     }
 
     #[cfg(target_arch = "xtensa")]
-    pub fn emit(tag: u32, x: f32, y: f32, w: f32, h: f32) {
-        unsafe { slint_esp_debug_rect(tag, x as i32, y as i32, w as i32, h as i32) }
+    pub fn ends(radius: f32, before_end: f32, now_end: f32, marked: bool) {
+        unsafe {
+            slint_esp_debug_rect(
+                if marked { 5 } else { 4 },
+                radius as i32,
+                (before_end * 10.) as i32,
+                (now_end * 10.) as i32,
+                0,
+            )
+        }
     }
 
     #[cfg(not(target_arch = "xtensa"))]
-    pub fn emit(_tag: u32, _x: f32, _y: f32, _w: f32, _h: f32) { }
+    pub fn ends(_radius: f32, _before_end: f32, _now_end: f32, _marked: bool) { }
 }
 
 impl Path {
@@ -424,16 +434,7 @@ impl Path {
         // at the origin so it hid the bug; the inner one is inset 31px and was having a region
         // 31px away from its arc repainted, which is where the gaps came from.
         let out = owed.inflate(ARC_BAND_SLACK, ARC_BAND_SLACK);
-        // tag 1: the band this frame owes, in parent space.
-        debug_rect::emit(1, out.origin.x, out.origin.y, out.size.width, out.size.height);
-        // tag 2: how far each end moved, so a large delta with a small band is visible.
-        debug_rect::emit(
-            2,
-            before.start,
-            now.start,
-            before.start + before.sweep,
-            now.start + now.sweep,
-        );
+        arc_trace::ends(now.radius, before.start + before.sweep, now.start + now.sweep, true);
         Some(out)
     }
 
