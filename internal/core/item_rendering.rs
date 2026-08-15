@@ -211,16 +211,41 @@ mod walk_mark {
     pub fn mark(_phase: u32) { }
 }
 
+/// How far outside its own geometry an item may paint, in logical pixels.
+///
+/// Subtree bounds are unioned from item *geometry*, but drawing can reach a little past it -
+/// anti-aliased edges, and the arc fringe that `Path::arc_dirty_rect` allows for with
+/// `ARC_BAND_SLACK`. Items that reach much further than this (shadows, transforms, opacity
+/// layers) are marked unprunable instead of being covered by a margin.
+const SUBTREE_PAINT_SLACK: crate::Coord = 8 as crate::Coord;
+
+/// Render the children of `index`, returning the bounds of everything visited, in the
+/// coordinate space of `index` itself.
+///
+/// `None` means "do not prune this subtree": something in it paints outside its geometry by
+/// an amount a fixed margin cannot bound.
 pub fn render_item_children(
     renderer: &mut dyn ItemRenderer,
     component: &ItemTreeRc,
     index: isize,
     window_adapter: &WindowAdapterRc,
-) {
+) -> Option<LogicalRect> {
+    let mut subtree: Option<LogicalRect> = Some(LogicalRect::default());
     let mut actual_visitor =
         |component: &ItemTreeRc, index: u32, item: Pin<ItemRef>| -> VisitChildrenResult {
             renderer.save_state();
             let item_rc = ItemRc::new(component.clone(), index);
+
+            // Whole subtrees that cannot reach the dirty region are skipped outright. Only
+            // drawing was filtered before; the walk itself descended regardless, and on this
+            // target the walk is the expensive part.
+            if let Some(bounds) = renderer.subtree_bounds(&item_rc) {
+                if !renderer.subtree_can_paint(&bounds) {
+                    subtree = subtree.map(|s| union_or(s, bounds));
+                    renderer.restore_state();
+                    return VisitChildrenResult::CONTINUE;
+                }
+            }
 
             walk_mark::mark(9);
             let (do_draw, item_geometry) = renderer.filter_item(&item_rc, window_adapter);
@@ -251,9 +276,38 @@ pub fn render_item_children(
                 RenderingResult::ContinueRenderingChildren
             };
 
-            if matches!(render_result, RenderingResult::ContinueRenderingChildren) {
-                render_item_children(renderer, component, index as isize, window_adapter);
-            }
+            let children = if matches!(render_result, RenderingResult::ContinueRenderingChildren) {
+                render_item_children(renderer, component, index as isize, window_adapter)
+            } else {
+                // The item took over its children; assume they can be anywhere.
+                None
+            };
+
+            // An item that paints outside its geometry by an unbounded amount poisons the
+            // subtree, matching the descend-regardless cases above.
+            let unbounded = item.as_ref().clips_children()
+                || ItemRef::downcast_pin::<BoxShadow>(item).is_some()
+                || ItemRef::downcast_pin::<Transform>(item).is_some()
+                || ItemRef::downcast_pin::<Opacity>(item).is_some()
+                || ItemRef::downcast_pin::<Layer>(item).is_some();
+
+            let mine = if unbounded {
+                None
+            } else {
+                children.map(|c| {
+                    let c = c.translate(item_origin.to_vector());
+                    union_or(
+                        item_geometry.inflate(SUBTREE_PAINT_SLACK, SUBTREE_PAINT_SLACK),
+                        c,
+                    )
+                })
+            };
+            renderer.set_subtree_bounds(&item_rc, mine);
+            subtree = match (subtree, mine) {
+                (Some(s), Some(m)) => Some(union_or(s, m)),
+                _ => None,
+            };
+
             renderer.restore_state();
             VisitChildrenResult::CONTINUE
         };
@@ -263,6 +317,18 @@ pub fn render_item_children(
         crate::item_tree::TraversalOrder::BackToFront,
         actual_visitor,
     );
+    subtree
+}
+
+/// Union that treats an empty rect as "nothing yet" rather than a rect at the origin.
+fn union_or(a: LogicalRect, b: LogicalRect) -> LogicalRect {
+    if a.is_empty() {
+        b
+    } else if b.is_empty() {
+        a
+    } else {
+        a.union(&b)
+    }
 }
 
 /// Renders the tree of items that component holds, using the specified renderer. Rendering is done
@@ -712,6 +778,20 @@ pub trait ItemRenderer {
     /// Returns
     ///  - if the item needs to be drawn (false means it is clipped or doesn't need to be drawn)
     ///  - the geometry of the item
+    /// Bounds of an item's whole subtree from a previous frame, if known. `None` disables
+    /// pruning for it. Renderers that do not track this never prune.
+    fn subtree_bounds(&mut self, _item: &ItemRc) -> Option<LogicalRect> {
+        None
+    }
+
+    /// Record the subtree bounds computed while walking, for the next frame to prune against.
+    fn set_subtree_bounds(&mut self, _item: &ItemRc, _bounds: Option<LogicalRect>) {}
+
+    /// Whether anything inside these bounds could land in the region being repainted.
+    fn subtree_can_paint(&mut self, _bounds: &LogicalRect) -> bool {
+        true
+    }
+
     fn filter_item(
         &mut self,
         item: &ItemRc,
