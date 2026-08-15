@@ -1150,7 +1150,9 @@ mod arc_line_tests {
             center_y: PhysicalLength::new(C),
             outer_radius: PhysicalLength::new(OUTER),
             inner_radius: PhysicalLength::new(INNER),
-            color: PremultipliedRgbaColor { alpha: 255, red: 255, green: 255, blue: 255 },
+            // #ff8800, the gauge indicator colour. White quantises exactly in 565 and so
+            // cannot show a rounding difference between the two fill paths.
+            color: PremultipliedRgbaColor { alpha: 255, red: 255, green: 136, blue: 0 },
             start_dir: unit(start_deg),
             end_dir: unit(start_deg + sweep_deg),
             reflex: sweep_deg.abs() > 180.,
@@ -1223,6 +1225,84 @@ mod arc_line_tests {
                 }
             }
         }
+    }
+
+    /// Like `arc`, but with the round caps the firmware's gauges actually use. The cap
+    /// centres sit on the stroke's centre line at each end of the sweep.
+    fn arc_round(start_deg: f32, sweep_deg: f32) -> super::super::ArcCommand {
+        let mut a = arc(start_deg, sweep_deg);
+        a.round_caps = true;
+        let mid = ((OUTER + INNER) / 2) as f32;
+        let at = |d: f32| {
+            let r = d.to_radians();
+            (
+                PhysicalLength::new((C as f32 + mid * r.cos()) as i16),
+                PhysicalLength::new((C as f32 + mid * r.sin()) as i16),
+            )
+        };
+        a.start_cap = at(start_deg);
+        a.end_cap = at(start_deg + sweep_deg);
+        a
+    }
+
+    /// Rgb565, not Rgb8: the interior of a span is filled by `blend_slice` while its end
+    /// pixels go through `blend_coverage`, and those two only round to different values once
+    /// the result is quantised to 5/6/5. An Rgb8 buffer hides the whole class of defect.
+    fn row_values(a: &super::super::ArcCommand, row: i16, from: usize, to: usize) -> Vec<u16> {
+        let span = PhysicalRect::new(euclid::point2(0, 0), euclid::size2(W as i16, W as i16));
+        let mut buf = vec![Rgb565Pixel(0); to - from];
+        draw_arc_line(&span, PhysicalLength::new(row), a, &mut buf, from as i16);
+        buf.iter().map(|p| p.0).collect()
+    }
+
+    /// Clipping must not change the *value* of any pixel, only which ones are offered.
+    ///
+    /// `clipped_drawing_matches_full_width` compares sets of painted indices with an
+    /// `r > 40` threshold, so it cannot see a pixel that is painted in both passes but with
+    /// different coverage. That is exactly the defect: the antialiased pixel at the edge of
+    /// a clipped window gets coverage measured against the window instead of against the
+    /// arc, and the one-step colour difference is left on the panel because nothing repaints
+    /// that pixel afterwards.
+    #[test]
+    fn clipped_drawing_matches_full_width_including_coverage() {
+        let mut failures = Vec::new();
+        for (start, sweep) in
+            [(140., 60.), (140., 200.), (330., 60.), (45., 90.), (0., 30.), (170., 20.), (90., 20.)]
+        {
+            for a in [arc(start, sweep), arc_round(start, sweep)] {
+                for row in [C - OUTER + 3, C - 120, C - 1, C, C + 1, C + 120, C + OUTER - 3] {
+                    let full = row_values(&a, row, 0, W);
+                    for from in [0usize, 100, 101, 200, 233, 300, 111] {
+                        for len in [1usize, 2, 7, 44, 120, 166] {
+                            let to = (from + len).min(W);
+                            if to <= from {
+                                continue;
+                            }
+                            let clipped = row_values(&a, row, from, to);
+                            for (i, px) in clipped.iter().enumerate() {
+                                if *px != full[from + i] {
+                                    failures.push(alloc::format!(
+                                        "start={start} sweep={sweep} caps={} row={row}                                          window={from}..{to} x={} clipped=0x{:04x} full=0x{:04x}",
+                                        a.round_caps,
+                                        from + i,
+                                        px,
+                                        full[from + i]
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} clipped pixels differ in value from the full-width pass; first 10:
+{}",
+            failures.len(),
+            failures.iter().take(10).cloned().collect::<Vec<_>>().join("
+")
+        );
     }
 
     fn contiguous_groups(xs: &[usize]) -> Vec<(usize, usize)> {

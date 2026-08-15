@@ -321,7 +321,7 @@ const ARC_BAND_SLACK: Coord = 6 as Coord;
 /// survives a 30px slack, and `clipped_drawing_matches_full_width` proves the rasteriser
 /// paints identically clipped or not - and yet the panel still showed gaps in a moving arc
 /// while full invalidation was always clean. Until that is explained, correctness wins.
-const ARC_NO_NARROWING: bool = true;
+const ARC_NO_NARROWING: bool = false;
 
 impl Path {
     /// The region to invalidate when this Path is dirty, if a narrower one than the whole
