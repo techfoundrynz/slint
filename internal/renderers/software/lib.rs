@@ -2433,6 +2433,15 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
     ) -> bool {
         // Only a plain stroke is expressible as a ring. A fill, or a rotated screen, goes
         // through the general path so nothing is silently drawn wrong.
+        // DIAGNOSTIC: always fall back to the general path rasteriser. Invalidation has been
+        // proven correct (continuity traced across consecutive frames, band position and size
+        // both eliminated), so the remaining candidate is the analytic arc mis-drawing when
+        // clipped to a narrow band - which full invalidation would hide, since it is never
+        // clipped narrowly there. If the gaps survive this, the analytic path is innocent too.
+        if true {
+            return false;
+        }
+        #[allow(unreachable_code)]
         if !path.fill().is_transparent() || self.rotation.orientation != RenderingRotation::NoRotation
         {
             return false;
