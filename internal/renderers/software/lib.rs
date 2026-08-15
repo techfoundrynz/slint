@@ -1636,6 +1636,27 @@ fn prepare_scene(
                 .transformed(rotation)
                 .into()
         });
+        #[allow(unsafe_code)]
+        {
+            #[cfg(target_arch = "xtensa")]
+            unsafe extern "C" {
+                fn slint_esp_debug_rect(tag: u32, x: i32, y: i32, w: i32, h: i32);
+            }
+            #[cfg(target_arch = "xtensa")]
+            for r in renderer.dirty_region.iter() {
+                // tag 3: a rect of the region actually being repainted, logical space.
+                unsafe {
+                    slint_esp_debug_rect(
+                        3,
+                        r.origin.x as i32,
+                        r.origin.y as i32,
+                        r.size.width as i32,
+                        r.size.height as i32,
+                    )
+                };
+            }
+        }
+
         dirty_region = PhysicalRegion {
             rectangles: core::array::from_fn(|_| i.next().unwrap_or_default().to_box2d()),
             count: renderer.dirty_region.iter().count(),

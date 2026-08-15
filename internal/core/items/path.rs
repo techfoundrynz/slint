@@ -170,6 +170,25 @@ impl Item for Path {
     }
 }
 
+
+/// Diagnostic: emit a rectangle to the firmware so the band this computes can be compared
+/// against the dirty region the frame actually repaints. Compiles to nothing off-Xtensa.
+#[allow(unsafe_code)]
+mod debug_rect {
+    #[cfg(target_arch = "xtensa")]
+    unsafe extern "C" {
+        fn slint_esp_debug_rect(tag: u32, x: i32, y: i32, w: i32, h: i32);
+    }
+
+    #[cfg(target_arch = "xtensa")]
+    pub fn emit(tag: u32, x: f32, y: f32, w: f32, h: f32) {
+        unsafe { slint_esp_debug_rect(tag, x as i32, y as i32, w as i32, h as i32) }
+    }
+
+    #[cfg(not(target_arch = "xtensa"))]
+    pub fn emit(_tag: u32, _x: f32, _y: f32, _w: f32, _h: f32) { }
+}
+
 impl Path {
     /// Returns an iterator of the events of the path and an offset, so that the
     /// shape fits into the width/height of the path while respecting the stroke
@@ -399,10 +418,20 @@ impl Path {
         // Carry the previous frame's band forward once. See `prev_band`.
         let prev = self.arc_snapshot.prev_band.replace(pending);
         let owed = if prev.is_empty() { pending } else { pending.union(&prev) };
-        Some(
-            owed.inflate(ARC_BAND_SLACK, ARC_BAND_SLACK)
-                .translate(geometry.origin.to_vector()),
-        )
+        let out = owed
+            .inflate(ARC_BAND_SLACK, ARC_BAND_SLACK)
+            .translate(geometry.origin.to_vector());
+        // tag 1: the band this frame owes, in parent space.
+        debug_rect::emit(1, out.origin.x, out.origin.y, out.size.width, out.size.height);
+        // tag 2: how far each end moved, so a large delta with a small band is visible.
+        debug_rect::emit(
+            2,
+            before.start,
+            now.start,
+            before.start + before.sweep,
+            now.start + now.sweep,
+        );
+        Some(out)
     }
 
     fn arc_snapshot_now(self: Pin<&Self>, size: LogicalSize) -> Option<ArcSnapshot> {
