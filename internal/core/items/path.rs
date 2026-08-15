@@ -263,24 +263,25 @@ struct ArcSnapshot {
 struct ArcSnapshotCell {
     /// The geometry the last dirty region was computed from.
     last: core::cell::Cell<ArcSnapshot>,
-    /// Which cells still owe a repaint, one bit each, row major. Accumulated as
-    /// the arc changes and cleared when it is drawn, so a region that is computed but never
-    /// painted keeps its debt instead of being forgotten - which is how the exact-band
-    /// version lost track of what was on screen.
-    pending: core::cell::Cell<u64>,
+    /// The swept bands owed a repaint, unioned into one rect. Accumulated as the arc changes
+    /// and cleared when it is drawn, so a region computed for a frame that was never painted
+    /// keeps its debt. An empty rect means nothing is owed.
+    pending: core::cell::Cell<LogicalRect>,
+    /// Set when something a band cannot describe changed - a colour, a radius, a resize, the
+    /// first frame - so the whole element is owed. Separate from `pending` because that debt
+    /// also has to survive a frame that is computed but never painted.
+    pending_full: core::cell::Cell<bool>,
 }
 
-/// The element is divided into a 3x3 grid and invalidation is rounded out to whole cells.
+/// Invalidation is the exact swept band between the previous and current arc - the way
+/// LVGL's `inv_arc_area` does it - inflated by `ARC_BAND_SLACK`.
 ///
-/// Every fault in the exact version was sub-pixel: extremes lost to rounding, the drawn arc
-/// truncated a pixel away from the region computed for it, anti-aliasing reaching past the
-/// boundary. `ARC_BAND_SLACK` covers that reach directly, so the cells no longer have to be
-/// large enough to hide it and the grid is sized for area instead: a cell is repainted whole,
-/// so a coarse grid costs dirty pixels. Cells also coalesce - two bands landing in one cell
-/// become one rect rather than two, which matters because a DirtyRegion holds only three
-/// before merging them into their union.
-const ARC_GRID: usize = 3;
-
+/// It used to be rounded out to a grid of whole cells. That was a workaround for a bug that
+/// no longer exists: the band was inflated by 1px while the renderer paints up to 2.8px
+/// outside it, so only a grid coarse enough to hide the deficit kept the display clean. With
+/// the slack sized correctly the band stands on its own, and the grid only cost area - one
+/// cell of a 3x3 grid is 11% of a 466px panel, against a fraction of a percent for the band
+/// that a few degrees of movement actually sweeps.
 /// How far outside its exact extremes the renderer can actually paint the arc, in pixels.
 ///
 /// The values from `annular_sector_bounds` are exact, but the software renderer truncates
@@ -295,14 +296,6 @@ const ARC_GRID: usize = 3;
 /// centre and integer radii, making all of these errors identically zero.
 /// `bounds_cover_what_the_renderer_actually_paints` pins the bound at 5; this keeps 1 spare.
 const ARC_BAND_SLACK: Coord = 6 as Coord;
-const ARC_CELLS_ALL: u64 = (1u64 << (ARC_GRID * ARC_GRID)) - 1;
-
-/// Largest per-frame movement of either arc end that is still worth narrowing, in degrees.
-const ARC_MAX_DELTA: f32 = 60.;
-
-/// Beyond this many owed cells the narrowed rect is most of the element anyway, so take the
-/// whole thing rather than run the wide-band path that has proven fragile.
-const ARC_MAX_CELLS: u32 = (ARC_GRID * ARC_GRID) as u32 / 2;
 
 impl Path {
     /// The region to invalidate when this Path is dirty, if a narrower one than the whole
@@ -319,6 +312,7 @@ impl Path {
         };
         let before = self.arc_snapshot.last.replace(now);
         let mut pending = self.arc_snapshot.pending.get();
+        let mut pending_full = self.arc_snapshot.pending_full.get();
 
         // Only the two ends may differ, and neither by more than ARC_MAX_DELTA. Past that a
         // band bounds nothing useful, as lv_arc_set_start_angle also decides. Anything else,
@@ -337,7 +331,7 @@ impl Path {
         ];
         let attributable = before.valid
             && ArcSnapshot { start: now.start, sweep: now.sweep, ..before } == now
-            && !ends.iter().any(|(a, b)| (b - a).abs() > ARC_MAX_DELTA);
+            && !ends.iter().any(|(a, b)| (b - a).abs() > 180.);
 
         if attributable {
             let half = now.stroke_width / 2.;
@@ -358,32 +352,27 @@ impl Path {
                     a.min(b) - cap_slack,
                     a.max(b) + cap_slack,
                 );
-                pending |= arc_cells_covering(&band, geometry.size);
+                // Unioned rather than replaced: a band computed for a frame that was never
+                // painted still owes those pixels.
+                pending = if pending.is_empty() { band } else { pending.union(&band) };
             }
         } else {
-            pending = ARC_CELLS_ALL;
+            pending_full = true;
         }
 
-        // A mask covering half the grid is not a saving; take the whole element instead of
-        // trusting a band that wide.
-        if pending.count_ones() > ARC_MAX_CELLS {
-            pending = ARC_CELLS_ALL;
-        }
         self.arc_snapshot.pending.set(pending);
+        self.arc_snapshot.pending_full.set(pending_full);
 
         // Nothing attributable moved, so let the caller invalidate the item's own rect.
-        if pending == 0 || pending == ARC_CELLS_ALL {
+        if pending_full || pending.is_empty() {
             return None;
         }
-        // Arc coordinates are element-local; a bounding rect is in the parent's space.
-        //
-        // Inflated again after the cell rounding because the cells are a grid over the element
-        // and `arc_cells_covering` clamps to it, while the renderer clips the arc only to the
-        // ancestor clip. ArcGauge sets radius + stroke/2 to exactly half the element, so the
-        // ring's outer edge lands on the element edge and the fringe falls outside it - inside
-        // a clamped rect those pixels are unreachable at any grid pitch.
+        // Arc coordinates are element-local; a bounding rect is in the parent's space. The
+        // slack covers how far outside its exact extremes the renderer actually paints, and
+        // ArcGauge puts the ring's outer edge on the element edge, so this is deliberately
+        // not clamped to the element.
         Some(
-            arc_cells_bounds(pending, geometry.size)
+            pending
                 .inflate(ARC_BAND_SLACK, ARC_BAND_SLACK)
                 .translate(geometry.origin.to_vector()),
         )
@@ -415,55 +404,11 @@ impl Path {
     fn commit_arc_drawn(self: Pin<&Self>, size: LogicalSize) {
         if let Some(now) = self.arc_snapshot_now(size) {
             self.arc_snapshot.last.set(now);
-            // Drawn, so the cells no longer owe anything.
-            self.arc_snapshot.pending.set(0);
+            // Drawn, so nothing is owed.
+            self.arc_snapshot.pending.set(LogicalRect::default());
+            self.arc_snapshot.pending_full.set(false);
         }
     }
-}
-
-/// Which grid cells a rectangle touches, one bit per cell, row major.
-fn arc_cells_covering(r: &LogicalRect, size: LogicalSize) -> u64 {
-    let cw = size.width / ARC_GRID as Coord;
-    let ch = size.height / ARC_GRID as Coord;
-    if cw <= 0 as Coord || ch <= 0 as Coord {
-        return ARC_CELLS_ALL;
-    }
-    let last = ARC_GRID as i32 - 1;
-    let index = |v: Coord, step: Coord| ((v / step) as i32).clamp(0, last);
-    let (c0, c1) = (index(r.min_x(), cw), index(r.max_x(), cw));
-    let (r0, r1) = (index(r.min_y(), ch), index(r.max_y(), ch));
-    let mut mask = 0u64;
-    for row in r0..=r1 {
-        for col in c0..=c1 {
-            mask |= 1u64 << (row * ARC_GRID as i32 + col);
-        }
-    }
-    mask
-}
-
-/// The rectangle covering every set cell. Their bounding box rather than their exact union,
-/// which keeps this to one rect - a DirtyRegion holds only three before merging anyway.
-fn arc_cells_bounds(mask: u64, size: LogicalSize) -> LogicalRect {
-    let cw = size.width / ARC_GRID as Coord;
-    let ch = size.height / ARC_GRID as Coord;
-    let (mut c0, mut c1, mut r0, mut r1) = (ARC_GRID as i32, -1i32, ARC_GRID as i32, -1i32);
-    for row in 0..ARC_GRID as i32 {
-        for col in 0..ARC_GRID as i32 {
-            if mask & (1u64 << (row * ARC_GRID as i32 + col)) != 0 {
-                c0 = c0.min(col);
-                c1 = c1.max(col);
-                r0 = r0.min(row);
-                r1 = r1.max(row);
-            }
-        }
-    }
-    if c1 < 0 {
-        return LogicalRect::default();
-    }
-    LogicalRect::new(
-        euclid::point2(c0 as Coord * cw, r0 as Coord * ch),
-        euclid::size2((c1 - c0 + 1) as Coord * cw, (r1 - r0 + 1) as Coord * ch),
-    )
 }
 
 /// Bounding rectangle of the part of a ring between two angles, in degrees measured
@@ -515,7 +460,7 @@ fn annular_sector_bounds(
 
 #[cfg(test)]
 mod arc_dirty_tests {
-    use super::{annular_sector_bounds, ARC_BAND_SLACK, ARC_GRID};
+    use super::{annular_sector_bounds, ARC_BAND_SLACK};
     use crate::lengths::LogicalSize;
 
     /// Every pixel the swept difference can touch must lie inside the rect we declare
@@ -648,58 +593,21 @@ mod arc_dirty_tests {
         }
     }
 
-    /// Snapping out to whole cells must never lose the band, whatever the sub-pixel detail
-    /// - that is the entire reason for the grid.
+    /// The band a small movement sweeps must stay a small fraction of the element, which is
+    /// the whole reason for narrowing at all. The grid this replaced could not manage it: one
+    /// cell of a 3x3 grid is 11% of the element before a band is even considered.
     #[test]
-    fn cells_cover_the_band_they_are_derived_from() {
+    fn a_small_change_sweeps_a_small_band() {
         let size = LogicalSize::new(466., 466.);
-        let (cx, cy, inner, outer) = (233.0f32, 233.0f32, 221.0f32, 233.0f32);
-        for start in [0.0f32, 40., 90., 140., 176., 180., 184., 266., 350., 356.] {
-            for span in [1.0f32, 3., 30., 90., 179.] {
-                let band = annular_sector_bounds(cx, cy, inner, outer, start, start + span);
-                let r = super::arc_cells_bounds(super::arc_cells_covering(&band, size), size);
-                for i in 0..=200 {
-                    let a = (start + span * (i as f32 / 200.)).to_radians();
-                    for rad in [inner, outer] {
-                        let (x, y) = (cx + rad * a.cos(), cy + rad * a.sin());
-                        // Tolerance for the element's own edge, where the cell boundary
-                        // lands on the same coordinate and floating point disagrees in the
-                        // last digit.
-                        assert!(
-                            x >= r.min_x() - 0.01
-                                && x <= r.max_x() + 0.01
-                                && y >= r.min_y() - 0.01
-                                && y <= r.max_y() + 0.01,
-                            "start={start} span={span}: ({x:.1},{y:.1}) outside cells {r:?}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    /// A one degree change should land in one or two cells, not the whole element, or the
-    /// grid has bought nothing.
-    #[test]
-    fn a_small_change_touches_few_cells() {
-        let size = LogicalSize::new(466., 466.);
-        for start in [0.0f32, 45., 140., 200., 300.] {
-            let band = annular_sector_bounds(233., 233., 221., 233., start, start + 1.);
-            let mask = super::arc_cells_covering(&band, size);
-            // A 1-degree band is small enough to straddle at most one cell boundary per axis,
-            // so it can never need more than a 2x2 block whatever the grid pitch is. Asserting
-            // that rather than a raw cell count keeps this honest when ARC_GRID changes - the
-            // count grows with a finer grid while the area, which is what costs frames, shrinks.
-            let count = mask.count_ones();
-            assert!(count <= 4, "start={start}: touched {count} cells, mask {mask:#b}");
-            let r = super::arc_cells_bounds(mask, size);
-            let frac = (r.size.width * r.size.height) / (size.width * size.height);
-            let limit = (2.0 / ARC_GRID as f32).powi(2) * 1.02;
+        let full = size.width * size.height;
+        for start in [0.0f32, 45., 140., 200., 300., 359.] {
+            let band = annular_sector_bounds(233., 233., 221., 233., start, start + 1.)
+                .inflate(ARC_BAND_SLACK, ARC_BAND_SLACK);
+            let frac = (band.size.width * band.size.height) / full;
             assert!(
-                frac <= limit,
-                "start={start}: {:.1}% of the element, limit {:.1}%",
-                frac * 100.,
-                limit * 100.
+                frac <= 0.02,
+                "start={start}: band is {:.1}% of the element",
+                frac * 100.
             );
         }
     }
