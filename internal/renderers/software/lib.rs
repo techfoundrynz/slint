@@ -1395,43 +1395,6 @@ fn even_aligned(r: PhysicalRect, screen: &PhysicalRect) -> PhysicalRect {
         .unwrap_or(r)
 }
 
-/// Merges dirty rectangles whose row ranges overlap, when doing so does not cost much area.
-///
-/// `render_by_line` issues one callback per rectangle per line, and each callback re-walks the
-/// items active on that line. Measured on the firmware's dial screen that overhead is ~55us a
-/// callback against ~200 painted pixels, so on a screen whose rectangles overlap vertically the
-/// callback count, not the area, sets the frame cost. Merging two such rectangles replaces two
-/// callbacks per shared line with one, and the pixels it adds are far cheaper than the callback
-/// it removes - but only while the added area stays small, hence the ratio test.
-fn merge_overlapping_rows(region: &mut PhysicalRegion) {
-    const MAX_GROWTH_NUM: i64 = 13;
-    const MAX_GROWTH_DEN: i64 = 10;
-    let area = |b: &euclid::Box2D<i16, PhysicalPx>| -> i64 {
-        (b.width() as i64).max(0) * (b.height() as i64).max(0)
-    };
-    let mut merged = true;
-    while merged && region.count > 1 {
-        merged = false;
-        'outer: for i in 0..region.count {
-            for j in (i + 1)..region.count {
-                let (a, b) = (region.rectangles[i], region.rectangles[j]);
-                // Only vertical overlap creates the duplicate callbacks worth removing.
-                if a.min.y >= b.max.y || b.min.y >= a.max.y {
-                    continue;
-                }
-                let u = a.union(&b);
-                if area(&u) * MAX_GROWTH_DEN <= (area(&a) + area(&b)) * MAX_GROWTH_NUM {
-                    region.rectangles[i] = u;
-                    region.rectangles[j] = region.rectangles[region.count - 1];
-                    region.count -= 1;
-                    merged = true;
-                    break 'outer;
-                }
-            }
-        }
-    }
-}
-
 fn render_window_frame_by_line(
     window: &WindowInner,
     background: Brush,
@@ -1670,7 +1633,6 @@ fn prepare_scene(
             count: renderer.dirty_region.iter().count(),
         };
         drop(i);
-        merge_overlapping_rows(&mut dirty_region);
 
         let partial = software_renderer.repaint_buffer_type.get() != RepaintBufferType::NewBuffer;
         for (component, origin) in components {
