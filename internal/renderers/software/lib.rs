@@ -1613,11 +1613,25 @@ fn prepare_scene(
         let rotation =
             RotationInfo { orientation: software_renderer.rotation.get(), screen_size: size };
         let screen_rect = PhysicalRect::from_size(size);
+        // Snap the horizontal bounds out to even pixels.
+        //
+        // Panels driven two pixels per word want an even x window, so a firmware that widens
+        // each span to suit has to invent the odd pixel - typically by replicating its
+        // neighbour. That invented pixel lies outside the dirty range, so nothing ever
+        // repaints it: at a boundary cutting through drawn content it erases a pixel or
+        // extends one, and the error persists until some later region happens to cover it.
+        // Handing out even bounds costs at most two pixels a rect and removes the problem at
+        // the source, since the renderer then actually draws every pixel it hands over.
+        let snap_even = |r: PhysicalRect| -> PhysicalRect {
+            let x0 = r.origin.x & !1;
+            let x1 = (r.origin.x + r.size.width + 1) & !1;
+            PhysicalRect::new(
+                euclid::point2(x0, r.origin.y),
+                euclid::size2(x1 - x0, r.size.height),
+            )
+        };
         let mut i = renderer.dirty_region.iter().filter_map(|r| {
-            (r.cast() * factor)
-                .to_rect()
-                .round_out()
-                .cast()
+            snap_even((r.cast() * factor).to_rect().round_out().cast())
                 .intersection(&screen_rect)?
                 .transformed(rotation)
                 .into()
