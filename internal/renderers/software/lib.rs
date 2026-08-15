@@ -647,13 +647,13 @@ impl SoftwareRenderer {
                 let rotation = RotationInfo { orientation: rotation, screen_size: size };
                 let screen_rect = PhysicalRect::from_size(size);
                 let mut i = renderer.dirty_region.iter().filter_map(|r| {
-                    (r.cast() * factor)
+                    let r = (r.cast() * factor)
                         .to_rect()
                         .round_out()
                         .cast()
                         .intersection(&screen_rect)?
-                        .transformed(rotation)
-                        .into()
+                        .transformed(rotation);
+                    Some(even_aligned(r, &screen_rect))
                 });
                 let dirty_region = PhysicalRegion {
                     rectangles: core::array::from_fn(|_| i.next().unwrap_or_default().to_box2d()),
@@ -1372,6 +1372,22 @@ fn parley_disabled() -> bool {
     false
 }
 
+/// Rounds a dirty rectangle outward to even coordinates, clamped to the screen.
+///
+/// Many MCU display controllers require every coordinate of a draw window to be even. Rounding
+/// here rather than in the driver widens the region before the scene is rendered, so the added
+/// row and column are genuinely painted; a driver that widens its window afterwards has to
+/// invent those pixels, and at the edge of a dirty region nothing ever repaints them.
+fn even_aligned(r: PhysicalRect, screen: &PhysicalRect) -> PhysicalRect {
+    let x0 = r.min_x() & !1;
+    let y0 = r.min_y() & !1;
+    let x1 = (r.max_x() + 1) & !1;
+    let y1 = (r.max_y() + 1) & !1;
+    PhysicalRect::new(euclid::point2(x0, y0), euclid::size2(x1 - x0, y1 - y0))
+        .intersection(screen)
+        .unwrap_or(r)
+}
+
 fn render_window_frame_by_line(
     window: &WindowInner,
     background: Brush,
@@ -1583,13 +1599,15 @@ fn prepare_scene(
             RotationInfo { orientation: software_renderer.rotation.get(), screen_size: size };
         let screen_rect = PhysicalRect::from_size(size);
         let mut i = renderer.dirty_region.iter().filter_map(|r| {
-            (r.cast() * factor)
+            // After the rotation, not before: the alignment the panel needs is on the
+            // coordinates the draw window is expressed in, which are screen space.
+            let r = (r.cast() * factor)
                 .to_rect()
                 .round_out()
                 .cast()
                 .intersection(&screen_rect)?
-                .transformed(rotation)
-                .into()
+                .transformed(rotation);
+            Some(even_aligned(r, &screen_rect))
         });
         dirty_region = PhysicalRegion {
             rectangles: core::array::from_fn(|_| i.next().unwrap_or_default().to_box2d()),
