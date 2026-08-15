@@ -148,8 +148,6 @@ impl Item for Path {
             (*backend).combine_clip(size.into(), LogicalBorderRadius::zero());
         }
         (*backend).draw_path(self, self_rc, size);
-        // The arc is now on screen, so it becomes the baseline for the next difference.
-        self.commit_arc_drawn(size);
         if clip {
             (*backend).restore_state();
         }
@@ -254,167 +252,74 @@ struct ArcSnapshot {
     height: f32,
 }
 
-/// The arc geometry as it was last actually drawn to the screen.
-///
-/// Deliberately not updated when a dirty region is computed: a region can be computed and
-/// then never painted, and measuring the next difference from geometry that never reached
-/// the screen skips whatever is still on it. Committed from `render`, which only runs when
-/// the item is really being drawn.
+/// The arc geometry the last dirty region was measured against.
 #[repr(C)]
 #[derive(Default)]
 struct ArcSnapshotCell {
-    /// The geometry the last dirty region was computed from.
     last: core::cell::Cell<ArcSnapshot>,
-    /// The swept bands owed a repaint, unioned into one rect. Accumulated as the arc changes
-    /// and cleared when it is drawn, so a region computed for a frame that was never painted
-    /// keeps its debt. An empty rect means nothing is owed.
-    pending: core::cell::Cell<LogicalRect>,
-    /// The band invalidated on the previous frame, kept for one extra frame and unioned into
-    /// the next region. commit_arc_drawn runs during the scene-build walk - Path::render only
-    /// pushes a SceneItem, the pixels are painted later per line inside render_by_line - so
-    /// the debt is discharged before anything reaches the panel. Anything marked but not
-    /// actually painted was simply forgotten, which showed up as gaps in an arc whose value
-    /// was climbing while rendering stalled and caught up. Repainting the previous band once
-    /// more costs a little area and makes a late or dropped paint self-correcting.
-    prev_band: core::cell::Cell<LogicalRect>,
-    /// Set once the caller has actually invalidated a region covering the debt above. The
-    /// debt is only discharged when that happened AND the arc then rendered: the item can be
-    /// drawn because some neighbouring item made the region overlap it, in which case the
-    /// owed band was never in the region and never painted. Clearing on render alone lost
-    /// those pixels for good, which showed up as arc fragments under rapid updates.
-    pending_marked: core::cell::Cell<bool>,
-    /// Set when something a band cannot describe changed - a colour, a radius, a resize, the
-    /// first frame - so the whole element is owed. Separate from `pending` because that debt
-    /// also has to survive a frame that is computed but never painted.
-    pending_full: core::cell::Cell<bool>,
 }
 
-/// Invalidation is the exact swept band between the previous and current arc - the way
-/// LVGL's `inv_arc_area` does it - inflated by `ARC_BAND_SLACK`.
-///
-/// It used to be rounded out to a grid of whole cells. That was a workaround for a bug that
-/// no longer exists: the band was inflated by 1px while the renderer paints up to 2.8px
-/// outside it, so only a grid coarse enough to hide the deficit kept the display clean. With
-/// the slack sized correctly the band stands on its own, and the grid only cost area - one
-/// cell of a 3x3 grid is 11% of a 466px panel, against a fraction of a percent for the band
-/// that a few degrees of movement actually sweeps.
 /// How far outside its exact extremes the renderer can actually paint the arc, in pixels.
 ///
-/// The values from `annular_sector_bounds` are exact, but the software renderer truncates
-/// the centre and both radii into i16 when it builds the ArcCommand, which shifts the whole
-/// figure by up to (1,1)px and shortens each radius by up to 1px, and it then anti-aliases
-/// half a pixel past every span end. Round caps are discs on the same truncated centre line.
-/// Those compound to a measured 2.8px on the ring, and 5px at a round cap - whose allowance
-/// here is angular (`atan + 1deg`) and so cannot absorb the cap centre's linear truncation.
-/// Against that the previous 1px was never enough. The deficit only escaped the returned rect
-/// when a band edge fell within ~2px inside a cell boundary, which is why a 155px grid looked
-/// clean and a 93px one did not, and why every single-frame test passed: they use an integer
-/// centre and integer radii, making all of these errors identically zero.
-/// `bounds_cover_what_the_renderer_actually_paints` pins the bound at 5; this keeps 1 spare.
+/// `annular_sector_bounds` is exact, but the software renderer truncates the centre and both
+/// radii to `i16` when it builds the `ArcCommand`, shifting the figure by up to (1,1)px and
+/// shortening each radius, and it anti-aliases half a pixel past every span end. Round caps
+/// are discs on the same truncated centre line, and the angular cap allowance below cannot
+/// absorb a linear truncation. That measures 2.8px on the ring and 5px at a cap;
+/// `bounds_cover_what_the_renderer_actually_paints` pins the floor at 5.
 const ARC_BAND_SLACK: Coord = 6 as Coord;
-
-/// Diagnostic switch: when true every arc change invalidates the whole element.
-/// Arc narrowing is off.
-///
-/// Narrowing is correct as far as anything could be measured - band continuity is unbroken
-/// across consecutive frames, band position matches the repainted region exactly, coverage
-/// survives a 30px slack, and `clipped_drawing_matches_full_width` proves the rasteriser
-/// paints identically clipped or not - and yet the panel still showed gaps in a moving arc
-/// while full invalidation was always clean. Until that is explained, correctness wins.
-const ARC_NO_NARROWING: bool = false;
 
 impl Path {
     /// The region to invalidate when this Path is dirty, if a narrower one than the whole
     /// element can be justified.
     ///
-    /// Returns `Some(rect)` only when the arc is unchanged apart from its sweep, in which
-    /// case every pixel outside the swept difference is identical to the previous frame.
-    /// Anything else - a colour, a radius, a resize, or the first frame - returns `None`
-    /// and the caller invalidates the full bounding rect. Under-invalidating here leaves
-    /// stale pixels on screen indefinitely, so the comparison is deliberately total.
+    /// Returns `Some(rect)` only when the arc is unchanged apart from its sweep, in which case
+    /// every pixel outside the swept difference is identical to the previous frame. Anything
+    /// else returns `None` and the caller invalidates the full bounding rect. Under-invalidating
+    /// leaves stale pixels on screen indefinitely, so the comparison is deliberately total.
     pub fn arc_dirty_rect(self: Pin<&Self>, geometry: LogicalRect) -> Option<LogicalRect> {
-        // DIAGNOSTIC: narrowing disabled. Returning None makes the caller invalidate the whole
-        // element for any arc change, which is always correct but repaints far more. Splits the
-        // arc-artifact hunt in half - if fragments survive this, invalidation coverage is not
-        // the cause and the fault is in drawing or the flush.
-        if ARC_NO_NARROWING {
-            let _ = geometry;
-            return None;
-        }
-        let Some(now) = self.arc_snapshot_now(geometry.size) else {
-            return None;
-        };
+        let _ = geometry;
+        let now = self.arc_snapshot_now(geometry.size)?;
         let before = self.arc_snapshot.last.replace(now);
-        let mut pending = self.arc_snapshot.pending.get();
-        let mut pending_full = self.arc_snapshot.pending_full.get();
 
-        // Only the two ends may differ, and neither by more than ARC_MAX_DELTA. Past that a
-        // band bounds nothing useful, as lv_arc_set_start_angle also decides. Anything else,
+        // Only the two ends may differ, and neither by more than half a turn - past that the
+        // band bounds nothing useful, as `lv_arc_set_start_angle` also decides. Anything else,
         // including the first frame, owes the whole element.
-        //
-        // The threshold is well below half a turn on purpose. A large per-frame delta is
-        // exactly what a dropped frame produces, and it is where narrowing both stops paying
-        // (the band's bounding box approaches the element) and is most exposed: a wide band
-        // straddles more cell boundaries, and any frame whose painting does not cover every
-        // owed cell loses that debt permanently, because commit_arc_drawn clears the whole
-        // mask on the strength of Path::render having been entered. Under rapid updates that
-        // showed up as arc fragments left on screen as the frame rate fell.
-        let ends = [
-            (before.start, now.start),
-            (before.start + before.sweep, now.start + now.sweep),
-        ];
-        let attributable = before.valid
-            && ArcSnapshot { start: now.start, sweep: now.sweep, ..before } == now
-            && !ends.iter().any(|(a, b)| (b - a).abs() > 180.);
-
-        if attributable {
-            let half = now.stroke_width / 2.;
-            let radius = now.radius;
-            // A round cap is a disc on the stroke's centre line, reaching past the end by
-            // asin(half / radius); atan of the same ratio bounds it from above.
-            let cap_slack =
-                if radius > 0. { (half / radius).atan().to_degrees() } else { 0. } + 1.;
-            for (a, b) in ends {
-                if a == b {
-                    continue;
-                }
-                let band = annular_sector_bounds(
-                    now.center_x,
-                    now.center_y,
-                    (radius - half).max(0.),
-                    radius + half,
-                    a.min(b) - cap_slack,
-                    a.max(b) + cap_slack,
-                );
-                // Unioned rather than replaced: a band computed for a frame that was never
-                // painted still owes those pixels.
-                pending = if pending.is_empty() { band } else { pending.union(&band) };
-            }
-        } else {
-            pending_full = true;
-        }
-
-        self.arc_snapshot.pending.set(pending);
-        self.arc_snapshot.pending_full.set(pending_full);
-
-        // Nothing attributable moved, so let the caller invalidate the item's own rect.
-        if pending_full || pending.is_empty() {
+        let ends =
+            [(before.start, now.start), (before.start + before.sweep, now.start + now.sweep)];
+        if !before.valid
+            || (ArcSnapshot { start: now.start, sweep: now.sweep, ..before }) != now
+            || ends.iter().any(|(a, b)| (b - a).abs() > 180.)
+        {
             return None;
         }
-        // Arc coordinates are element-local; a bounding rect is in the parent's space. The
-        // slack covers how far outside its exact extremes the renderer actually paints, and
-        // ArcGauge puts the ring's outer edge on the element edge, so this is deliberately
-        // not clamped to the element.
-        // Carry the previous frame's band forward once. See `prev_band`.
-        let prev = self.arc_snapshot.prev_band.replace(pending);
-        let owed = if prev.is_empty() { pending } else { pending.union(&prev) };
-        // Deliberately NOT translated by geometry.origin. The caller marks this with the same
-        // transform it uses for the item's own bounding rect, and that transform already
-        // carries the item's offset - translating here counted it twice. The outer gauge sits
-        // at the origin so it hid the bug; the inner one is inset 31px and was having a region
-        // 31px away from its arc repainted, which is where the gaps came from.
-        let out = owed.inflate(ARC_BAND_SLACK, ARC_BAND_SLACK);
-        Some(out)
+
+        let half = now.stroke_width / 2.;
+        let radius = now.radius;
+        // A round cap is a disc on the stroke's centre line, reaching past the end by
+        // asin(half / radius); atan of the same ratio bounds it from above.
+        let cap_slack = if radius > 0. { (half / radius).atan().to_degrees() } else { 0. } + 1.;
+        let mut owed = LogicalRect::default();
+        for (a, b) in ends {
+            if a == b {
+                continue;
+            }
+            let band = annular_sector_bounds(
+                now.center_x,
+                now.center_y,
+                (radius - half).max(0.),
+                radius + half,
+                a.min(b) - cap_slack,
+                a.max(b) + cap_slack,
+            );
+            owed = if owed.is_empty() { band } else { owed.union(&band) };
+        }
+        if owed.is_empty() {
+            return None;
+        }
+        // Deliberately not translated by `geometry.origin`: the caller applies the same
+        // transform it uses for the item's own bounding rect, which already carries the offset.
+        Some(owed.inflate(ARC_BAND_SLACK, ARC_BAND_SLACK))
     }
 
     fn arc_snapshot_now(self: Pin<&Self>, size: LogicalSize) -> Option<ArcSnapshot> {
@@ -438,29 +343,6 @@ impl Path {
         })
     }
 
-    /// Record the geometry as drawn. Called from `render`, so the baseline a later
-    /// difference is measured against is always something that reached the screen.
-    fn commit_arc_drawn(self: Pin<&Self>, size: LogicalSize) {
-        if let Some(now) = self.arc_snapshot_now(size) {
-            self.arc_snapshot.last.set(now);
-            // Only discharge the debt if a region covering it was actually invalidated this
-            // frame. Rendering alone is not proof it was painted - the item is drawn whenever
-            // the frame's region overlaps it at all, including when that overlap came from a
-            // neighbouring item and left the owed band outside it.
-            if self.arc_snapshot.pending_marked.get() {
-                self.arc_snapshot.pending.set(LogicalRect::default());
-                self.arc_snapshot.pending_full.set(false);
-            }
-        }
-        self.arc_snapshot.pending_marked.set(false);
-    }
-
-    /// Called by the partial renderer once it has invalidated a region that covers whatever
-    /// `arc_dirty_rect` reported as owed - either the narrowed band itself or, in the paths
-    /// that ignore it, the item's whole bounding rect.
-    pub fn arc_debt_marked(self: Pin<&Self>) {
-        self.arc_snapshot.pending_marked.set(true);
-    }
 }
 
 /// Bounding rectangle of the part of a ring between two angles, in degrees measured

@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
 //! A dial screen whose value climbs, rendered twice in lockstep: once through the partial
-//! renderer that reuses its buffer and once with a full repaint every frame. The two
-//! buffers must stay identical. Any divergence is a pixel the narrowed invalidation owed
-//! and never paid, which on hardware shows up as a gap in the arc.
+//! renderer reusing its buffer and once with a full repaint every frame. The two buffers must
+//! stay identical - any divergence is a pixel the narrowed invalidation owed and never paid.
 //!
-//! Both passes go through `render_by_line`, because that is the path the firmware runs;
-//! `SoftwareRenderer::render` takes a different route through `foreach_ranges`.
+//! Both passes go through `render_by_line`; `SoftwareRenderer::render` takes a different route
+//! through `foreach_ranges`.
 
 use slint::platform::software_renderer::{
     LineBufferProvider, MinimalSoftwareWindow, RenderingRotation, RepaintBufferType,
@@ -84,8 +83,8 @@ slint::slint! {
         // Mirrors the stats screen: a full-size outer dial, an inset dial offset from the
         // window origin (the geometry that exposed the double-counted item offset), and a
         // text that changes every frame so the dirty region carries more than one rect.
-        // The centres are deliberately fractional - integer geometry hid this class of bug
-        // from five earlier test suites.
+        // Fractional centres on purpose: integer geometry makes the renderer's i16
+        // truncation error identically zero and hides it.
         Gauge {
             x: 0phx; y: 0phx; width: 100%; height: 100%;
             q: root.q;
@@ -108,10 +107,8 @@ slint::slint! {
     }
 }
 
-/// The device renders `Rgb565BigEndianPixel` so the panel needs no byte swap, and that type
-/// has its own `blend_slice`/`blend`. Narrowed spans are short, odd-length and arbitrarily
-/// aligned where full-width spans are long, even and aligned, so the two pixel types have to
-/// be exercised separately.
+/// Both 565 pixel types have their own `blend_slice`/`blend`, and narrowed spans are short,
+/// odd-length and arbitrarily aligned where full-width spans are not, so both are exercised.
 trait TestPixel: TargetPixel + Copy + 'static {
     fn zero() -> Self;
     /// The native-endian 565 word, so both types compare on the same scale.
@@ -401,7 +398,7 @@ const ROTATIONS: [(RenderingRotation, &str); 4] = [
 #[test]
 fn climbing_arc_partial_matches_full_repaint() {
     // 400 steps over the full sweep: fine enough that consecutive frames differ by well
-    // under a pixel of arc length near the tip, which is the regime the artifact appears in.
+    // under a pixel of arc length near the tip.
     let mut sums: Vec<(&str, u64)> = Vec::new();
     for (rot, name) in ROTATIONS {
         let (d, sum) = run::<Rgb565Pixel>((0..=400).map(|i| i as f32 / 400.0), rot);
@@ -423,10 +420,8 @@ fn climbing_arc_partial_matches_full_repaint() {
 
 #[test]
 fn stalling_arc_partial_matches_full_repaint() {
-    // The device does not get a frame per value change. When rendering stalls and catches
-    // up, one frame's sweep covers what several would have, which is the regime the
-    // reported artifact appears in: "it stalls, then catches up but doesn't render the
-    // updates it missed".
+    // A device does not get a frame per value change: when rendering stalls and catches up,
+    // one frame's sweep covers what several would have.
     for (rot, name) in ROTATIONS {
         for jump in [3usize, 7, 17, 40] {
             let (d, _) = run::<Rgb565Pixel>((0..=400).step_by(jump).map(|i| i as f32 / 400.0), rot);

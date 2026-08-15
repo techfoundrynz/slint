@@ -425,31 +425,16 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
 
                         let geometry_changed = old_geom != new_geom;
 
-                        // Evaluated for every Path on every visit, not just when the
-                        // narrowed region is usable: the call is what advances the arc's
-                        // snapshot, and the snapshot has to keep describing the geometry
-                        // that was last painted or a later difference is measured from the
-                        // wrong baseline.
-                        // Reads the arc's properties, so it must not register them against
-                        // whatever binding is being evaluated - same reason the geometry
-                        // above is fetched with evaluate_no_tracking.
+                        // Evaluated on every visit, not only when the narrowed region is
+                        // usable: this call is what advances the arc's snapshot, and a later
+                        // difference measured from a stale one would skip what came between.
+                        // Reads the arc's properties, so it must not register them against the
+                        // binding being evaluated - as for the geometry above.
                         #[cfg(feature = "path")]
                         let arc_narrowed = crate::properties::evaluate_no_tracking(|| {
                             ItemRef::downcast_pin::<crate::items::Path>(item)
                                 .and_then(|p| p.arc_dirty_rect(*new_geom.bounding_rect()))
                         });
-                        // Tells the Path that a region covering its owed band really was
-                        // invalidated. Without this it discharges the debt on being rendered,
-                        // which also happens when a neighbouring item is what put it inside
-                        // the frame's region - and then the band is never painted.
-                        #[cfg(feature = "path")]
-                        let mark_arc_debt = || {
-                            if let Some(p) = ItemRef::downcast_pin::<crate::items::Path>(item) {
-                                p.arc_debt_marked();
-                            }
-                        };
-                        #[cfg(not(feature = "path"))]
-                        let mark_arc_debt = || {};
                         #[cfg(not(feature = "path"))]
                         let arc_narrowed: Option<LogicalRect> = None;
                         if ItemRef::downcast_pin::<Clip>(item).is_some()
@@ -484,7 +469,6 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
 
                             *cached_geom = new_geom;
 
-                            mark_arc_debt();
                             return ItemVisitorResult::Continue(new_state);
                         }
 
@@ -498,11 +482,7 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
 
                         if rendering_dirty {
                             // An arc whose sweep is all that changed only needs the swept
-                            // difference repainted, not the element it fills. `arc_narrowed`
-                            // was computed above - unconditionally, so that the arc's
-                            // snapshot always describes what was last painted. Deriving a
-                            // difference from a stale snapshot would skip whatever was
-                            // painted in between and leave it on screen.
+                            // difference repainted, not the whole element it fills.
                             let narrowed = if moved { None } else { arc_narrowed };
 
                             self.mark_dirty_rect(
@@ -510,7 +490,6 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                 state.transform_to_screen,
                                 &state.clipped,
                             );
-                            mark_arc_debt();
                             if moved {
                                 self.mark_dirty_rect(
                                     cached_geom.bounding_rect(),
@@ -532,8 +511,7 @@ impl<'a, T: ItemRenderer + ItemRendererFeatures> PartialRenderer<'a, T> {
                                     state.transform_to_screen,
                                     &state.clipped,
                                 );
-                                mark_arc_debt();
-                            } else if let Some(tr) = &tracker {
+                                } else if let Some(tr) = &tracker {
                                 tr.as_ref().register_as_dependency_to_current_binding();
                             }
 

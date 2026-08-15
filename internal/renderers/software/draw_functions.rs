@@ -270,10 +270,8 @@ pub(super) fn draw_texture_line(
                 }
             }
             TexturePixelFormat::AlphaMap => {
-                // Glyphs come through here, so this is the hottest loop for any screen with
-                // text. The colour channels are loop-invariant but were being re-masked out of
-                // `color` on every pixel, and at full alpha the coverage scaling collapses to a
-                // plain read. Same arithmetic, just hoisted.
+                // Hottest loop on any screen with text: the colour channels are
+                // loop-invariant, and at full alpha the coverage scaling collapses to a read.
                 let (cr, cg, cb) = (color.red(), color.green(), color.blue());
                 if alpha == 0xff {
                     for pix in line_buffer {
@@ -402,13 +400,7 @@ pub(super) fn draw_arc_line(
             (cx + (dx_f * dy) / dy_f, f32::INFINITY)
         } else if dx_f * dy >= 0. {
             // A horizontal ray has no x to solve for, so the row is in or out as a whole.
-            // The row it passes through is genuinely ambiguous - its y of zero sits on the
-            // boundary between the rows at dy = +/-0.5 - and excluding it costs the arc's
-            // outermost pixel row, a horizontal nick at 3 or 9 o'clock. Including the whole
-            // row instead admits the far side of the ring, which is worse: a 0..90 sector
-            // smears round to 180. Fixing it needs the row split at the centre per ray, and
-            // a 180 degree arc has both rays degenerate at once, where the intersection of
-            // two half planes cannot express "both tips".
+            // Rows within half a pixel of the centre are handled per pixel instead, above.
             (f32::NEG_INFINITY, f32::INFINITY)
         } else {
             (0., 0.)
@@ -441,10 +433,8 @@ pub(super) fn draw_arc_line(
                 cdx * cdx + cdy * cdy <= h * h
             })
         };
-        // Sweep the ring runs *and* the cap discs. Iterating the runs alone, and applying the
-        // run clip before the cap test, made a cap pixel lying outside the ring's radial run
-        // on this row unpaintable - a nick at the sweep tip whenever it passes 3 or 9 o'clock,
-        // which is exactly where these rows exist. The run clip belongs to the ring test only.
+        // Sweep the ring runs *and* the cap discs: a cap can cover a pixel outside the ring's
+        // radial run on this row, so the run clip gates only the ring test.
         let mut lo = f32::INFINITY;
         let mut hi = f32::NEG_INFINITY;
         for run in runs.iter().take(run_count) {

@@ -192,10 +192,6 @@ impl<T> ItemCache<T> {
 
 /// Renders the children of the item with the specified index into the renderer.
 
-/// Diagnostic hook: counts items visited and items actually drawn during the render walk,
-/// so the payoff of pruning scrolled-out subtrees can be sized before anyone writes it.
-/// The firmware supplies the counter; on any other target this compiles to nothing.
-
 /// How far outside its own geometry an item may paint, in logical pixels.
 ///
 /// Subtree bounds are unioned from item *geometry*, but drawing can reach a little past it -
@@ -221,9 +217,8 @@ pub fn render_item_children(
             renderer.save_state();
             let item_rc = ItemRc::new(component.clone(), index);
 
-            // Whole subtrees that cannot reach the dirty region are skipped outright. Only
-            // drawing was filtered before; the walk itself descended regardless, and on this
-            // target the walk is the expensive part.
+            // Skip whole subtrees that cannot reach the dirty region. Previously only the
+            // drawing was filtered and the walk descended regardless.
             if let Some(bounds) = renderer.subtree_bounds(&item_rc) {
                 if !renderer.subtree_can_paint(&bounds) {
                     subtree = subtree.map(|s| union_or(s, bounds));

@@ -1372,19 +1372,12 @@ fn parley_disabled() -> bool {
     false
 }
 
-/// Rounds a dirty rectangle outward so both edges land on an even coordinate, clamped to the
-/// screen.
+/// Rounds a dirty rectangle outward to even coordinates, clamped to the screen.
 ///
-/// Panels in this class (SH8601, CO5300 and the other QSPI AMOLED controllers) require every
-/// coordinate of a draw window to be even; the vendor drivers say so and LVGL carried a
-/// rounder callback to enforce it. A full-screen flush satisfies that by accident, because it
-/// starts at row 0 and advances by a whole chunk, so the requirement went unnoticed until
-/// partial repaint started handing over regions that begin on whatever row the damage does.
-///
-/// Rounding here rather than in the driver matters: this widens the region *before* the scene
-/// is rendered, so the renderer actually paints the added row and column. A driver that widens
-/// its window afterwards has to invent those pixels, and at the edge of a dirty band the
-/// invented pixel sits outside the region and is never repainted.
+/// Many MCU display controllers require every coordinate of a draw window to be even. Rounding
+/// here rather than in the driver widens the region before the scene is rendered, so the added
+/// row and column are genuinely painted; a driver that widens its window afterwards has to
+/// invent those pixels, and at the edge of a dirty region nothing ever repaints them.
 fn even_aligned(r: PhysicalRect, screen: &PhysicalRect) -> PhysicalRect {
     let x0 = r.min_x() & !1;
     let y0 = r.min_y() & !1;
@@ -1608,15 +1601,6 @@ fn prepare_scene(
         let rotation =
             RotationInfo { orientation: software_renderer.rotation.get(), screen_size: size };
         let screen_rect = PhysicalRect::from_size(size);
-        // Snap the horizontal bounds out to even pixels.
-        //
-        // Panels driven two pixels per word want an even x window, so a firmware that widens
-        // each span to suit has to invent the odd pixel - typically by replicating its
-        // neighbour. That invented pixel lies outside the dirty range, so nothing ever
-        // repaints it: at a boundary cutting through drawn content it erases a pixel or
-        // extends one, and the error persists until some later region happens to cover it.
-        // Handing out even bounds costs at most two pixels a rect and removes the problem at
-        // the source, since the renderer then actually draws every pixel it hands over.
         let mut i = renderer.dirty_region.iter().filter_map(|r| {
             // After the rotation, not before: the alignment the panel needs is on the
             // coordinates the draw window is expressed in, which are screen space.
@@ -2418,11 +2402,9 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         path: Pin<&i_slint_core::items::Path>,
         geom: &LogicalRect,
     ) -> bool {
-        // Only a plain stroke is expressible as a ring. A fill goes through the general path
-        // so nothing is silently drawn wrong. Rotation is handled below: a circle is
-        // rotation-invariant, so a rotated arc is still an arc about a transformed centre with
-        // its start angle shifted, and going through the general path instead would hand the
-        // zeno rasteriser a full-panel path whose scratch frame overflows even a 48KB stack.
+        // Only a plain stroke is expressible as a ring; a fill goes through the general path.
+        // Rotation is fine: a circle is rotation-invariant, so a rotated arc is still an arc
+        // about a transformed centre with its start angle shifted.
         if !path.fill().is_transparent() {
             return false;
         }
