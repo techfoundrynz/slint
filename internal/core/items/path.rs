@@ -261,12 +261,22 @@ struct ArcSnapshotCell {
 
 /// How far outside its exact extremes the renderer can actually paint the arc, in pixels.
 ///
-/// `annular_sector_bounds` is exact, but the software renderer truncates the centre and both
-/// radii to `i16` when it builds the `ArcCommand`, shifting the figure by up to (1,1)px and
-/// shortening each radius, and it anti-aliases half a pixel past every span end. Round caps
-/// are discs on the same truncated centre line, and the angular cap allowance below cannot
-/// absorb a linear truncation. That measures 2.8px on the ring and 5px at a cap;
-/// `bounds_cover_what_the_renderer_actually_paints` pins the floor at 5.
+/// `annular_sector_bounds` is exact, but the renderer anti-aliases half a pixel past every
+/// span end, the item origin it measures from is rounded to a whole pixel, and a round cap
+/// bulges past the sector's angular edge.
+///
+/// Applied twice on the way to a dirty region - once at the end of `annular_sector_bounds`
+/// and again on the union in `arc_dirty_region` - so the coverage is 2x this.
+///
+/// Measured worst overshoot past the exact bounds is 8.92px, which is half_stroke (7.92 on the
+/// widest gauge) + anti-aliasing (0.5) + origin rounding (0.5): a round cap bulging past the
+/// sector's angular edge, not quantisation. Making `ArcCommand` carry f32 instead of truncating
+/// to i16 therefore did *not* reduce what is needed here. 2x6 = 12 against 8.92; 5 is the
+/// arithmetic floor and leaves ~1px, which is not enough margin for a sampled measurement.
+///
+/// `slack_covers_measured_overshoot` fails if 2x this stops covering the worst case. Retune
+/// from what it reports, never by reasoning about the terms - too small a band leaves arc
+/// behind on hardware, and that failure survived five test suites once already.
 const ARC_BAND_SLACK: Coord = 6 as Coord;
 
 impl Path {
@@ -427,18 +437,77 @@ mod arc_dirty_tests {
         }
     }
 
-    /// The renderer does not draw the arc the bounds describe: building the ArcCommand
-    /// truncates the centre and both radii into i16, so the figure it paints is displaced and
-    /// undersized relative to the exact geometry, and anti-aliasing then reaches half a pixel
-    /// past every span end. This models that quantisation and asserts the band still contains
-    /// it. The geometry here is deliberately non-integral, taken from a real gauge on
-    /// a 466px panel - `bounds_cover_the_swept_difference` above uses an integer centre and
-    /// integer radii, which makes every truncation error identically zero and is why a 1px
-    /// slack survived five test suites while hardware kept leaving bands of arc behind.
+    /// The renderer does not draw exactly the arc the bounds describe: it anti-aliases half a
+    /// pixel past every span end, and the item origin it measures the centre from is rounded
+    /// to a whole pixel. This models that and asserts the band still contains what is painted.
+    ///
+    /// The ArcCommand once truncated the centre and both radii to i16 as well; it carries f32
+    /// now, so `quantise` below is a half-pixel origin rounding rather than a truncation. The
+    /// geometry is deliberately non-integral, taken from a real gauge on a 466px panel -
+    /// `bounds_cover_the_swept_difference` above uses an integer centre and integer radii,
+    /// which makes every quantisation error identically zero and is why a 1px slack survived
+    /// five test suites while hardware kept leaving bands of arc behind.
+    /// Ties ARC_BAND_SLACK to a measurement rather than arithmetic.
+    ///
+    /// `annular_sector_bounds` has already inflated by the slack once, so what this measures
+    /// is what the *second* inflation must absorb; asserting it stays under the constant is
+    /// exactly the production condition, 2x slack >= the true overshoot.
+    #[test]
+    fn slack_covers_measured_overshoot() {
+        let mut worst = 0.0f32;
+        for (cx, cy, radius, stroke) in [
+            (201.93333f32, 201.93333f32, 194.16667f32, 15.533334f32),
+            (233.0f32, 233.0f32, 227.0f32, 12.0f32),
+            (240.999f32, 240.999f32, 228.915f32, 15.83f32),
+            (232.999f32, 240.001f32, 220.5f32, 12.75f32),
+            (116.5f32, 116.5f32, 114.0f32, 12.0f32),
+        ] {
+            let half_stroke = stroke / 2.;
+            let (inner, outer) = (radius - half_stroke, radius + half_stroke);
+            let (innerq, outerq) = (inner.max(0.), outer);
+            let capq = half_stroke;
+            const AA: f32 = 0.5;
+            const OR: f32 = 0.5;
+            for (ox, oy) in [(-OR, -OR), (-OR, OR), (OR, -OR), (OR, OR)] {
+                let (cxq, cyq) = (cx + ox, cy + oy);
+                for start in [0.0f32, 45., 90., 133.7, 180., 224.3, 270., 315., 350.] {
+                    for span in [0.5f32, 1., 7., 89., 90., 91., 179., 181., 270., 359.] {
+                        let b = annular_sector_bounds(cx, cy, inner, outer, start, start + span);
+                        let mut out = |x: f32, y: f32| {
+                            let dx = (b.origin.x - x).max(x - (b.origin.x + b.size.width)).max(0.);
+                            let dy = (b.origin.y - y).max(y - (b.origin.y + b.size.height)).max(0.);
+                            let d = dx.max(dy);
+                            if d > worst { worst = d; }
+                        };
+                        for i in 0..=400 {
+                            let a = (start + span * (i as f32 / 400.)).to_radians();
+                            for rad in [innerq, (innerq + outerq) / 2., outerq] {
+                                out(cxq + rad * a.cos() - AA, cyq + rad * a.sin());
+                                out(cxq + rad * a.cos() + AA, cyq + rad * a.sin());
+                            }
+                        }
+                        for a in [start.to_radians(), (start + span).to_radians()] {
+                            let (ccx, ccy) = (cxq + radius * a.cos(), cyq + radius * a.sin());
+                            for k in 0..=64 {
+                                let t = (k as f32 / 64.) * core::f32::consts::TAU;
+                                out(ccx + (capq + AA) * t.cos(), ccy + (capq + AA) * t.sin());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            worst < ARC_BAND_SLACK as f32,
+            "worst overshoot {worst:.4}px needs ARC_BAND_SLACK above {}",
+            ARC_BAND_SLACK
+        );
+    }
+
     #[test]
     fn bounds_cover_what_the_renderer_actually_paints() {
         // A full-size dial, a small indicator arc, and centres whose fractional
-        // part is nearly a whole pixel - truncation is worst there, so a bound that holds for
+        // part is nearly a whole pixel - rounding is worst there, so a bound that holds for
         // 0.999 holds for anything.
         for (cx, cy, radius, stroke) in [
             (201.93333f32, 201.93333f32, 194.16667f32, 15.533334f32),
@@ -449,12 +518,22 @@ mod arc_dirty_tests {
         let half_stroke = stroke / 2.;
         let (inner, outer) = (radius - half_stroke, radius + half_stroke);
 
-        // What the ArcCommand ends up holding: i16 truncation toward zero throughout.
-        let (cxq, cyq) = (cx.trunc(), cy.trunc());
-        let (innerq, outerq) = ((radius - half_stroke).max(0.).trunc(), outer.trunc());
-        let capq = half_stroke.trunc();
+        // What the ArcCommand ends up holding: radii exactly, and a centre displaced by the
+        // rounding of the item origin the renderer measures it from. Worst case is half a
+        // pixel, and it can go either way, so probe both.
+        let (innerq, outerq) = ((radius - half_stroke).max(0.), outer);
+        let capq = half_stroke;
         // Horizontal anti-aliasing writes one column past each span end.
         const AA: f32 = 0.5;
+        const ORIGIN_ROUNDING: f32 = 0.5;
+
+        for (ox, oy) in [
+            (-ORIGIN_ROUNDING, -ORIGIN_ROUNDING),
+            (-ORIGIN_ROUNDING, ORIGIN_ROUNDING),
+            (ORIGIN_ROUNDING, -ORIGIN_ROUNDING),
+            (ORIGIN_ROUNDING, ORIGIN_ROUNDING),
+        ] {
+        let (cxq, cyq) = (cx + ox, cy + oy);
 
         for start in [0.0f32, 45., 90., 133.7, 180., 224.3, 270., 315., 350.] {
             for span in [0.5f32, 1., 7., 89., 90., 91., 179., 181., 270., 359.] {
@@ -481,8 +560,7 @@ mod arc_dirty_tests {
 
                 // Round caps: discs on the truncated stroke centre line, truncated radius.
                 for a in [start.to_radians(), (start + span).to_radians()] {
-                    let (ccx, ccy) =
-                        ((cx + radius * a.cos()).trunc(), (cy + radius * a.sin()).trunc());
+                    let (ccx, ccy) = (cxq + radius * a.cos(), cyq + radius * a.sin());
                     for k in 0..=64 {
                         let t = (k as f32 / 64.) * core::f32::consts::TAU;
                         contains(
@@ -493,6 +571,7 @@ mod arc_dirty_tests {
                     }
                 }
             }
+        }
         }
         }
     }
