@@ -2428,7 +2428,10 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         // outside it are never visited.
         let physical_geom_f32 =
             geom.translate(self.current_state.offset.to_vector()).cast() * self.scale_factor;
-        let origin = physical_geom_f32.round().origin;
+        // Not rounded: draw_border_rectangle keeps its geometry in f32, so snapping the arc
+        // origin here offsets an arc from a rectangle drawn at the same place by up to a
+        // pixel. Only the centre is derived from this; `bounds` below still rounds outward.
+        let origin = physical_geom_f32.origin;
         // A rotation maps the ring to another ring: transform the centre and shift the start
         // angle by the rotation, leaving radius, stroke and sweep untouched. The point
         // transform is the renderer's own, so the convention matches every other primitive -
