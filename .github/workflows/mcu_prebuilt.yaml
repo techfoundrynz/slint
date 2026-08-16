@@ -3,13 +3,18 @@
 # Consumers download these instead of building the Rust core, which removes the esp
 # Rust toolchain and a multi-minute cargo build from every firmware build.
 #
-# Two pieces are published per release:
+# Three pieces are published per release:
 #   Slint-cpp-<version>-<rust_target>.tar.gz   the static lib + C++ headers (incl. generated)
 #   slint-compiler-<host>(.exe)                 the .slint -> C++ compiler, host binaries
+#   slint-lsp-<host>(.exe)                      language server, for the editor preview
 #
 # The compiler MUST come from this fork: it carries the glyph-embedding limit that keeps
 # large font sizes inside the flash budget. Upstream's compiler would silently embed the
 # full charset.
+#
+# The LSP must too, for the same reason in reverse - it is the compiler the editor parses
+# with, so a stock one rejects our arc properties and no preview opens. Consumers point
+# the VS Code extension at it with slint.lspBinaryPath.
 
 name: MCU prebuilt package
 
@@ -81,8 +86,8 @@ jobs:
                   name: slint-cpp-${{ matrix.rust_target }}
                   path: ${{ runner.workspace }}/cppbuild/Slint-cpp-*.tar.gz
 
-    compiler:
-        name: slint-compiler (${{ matrix.host }})
+    host-binaries:
+        name: host binaries (${{ matrix.host }})
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
@@ -90,31 +95,32 @@ jobs:
                 include:
                     - os: windows-2022
                       host: windows-x86_64
-                      bin: slint-compiler.exe
+                      suffix: .exe
                     - os: ubuntu-22.04
                       host: linux-x86_64
-                      bin: slint-compiler
+                      suffix: ""
                     - os: macos-14
                       host: macos-aarch64
-                      bin: slint-compiler
+                      suffix: ""
         steps:
             - uses: actions/checkout@v6
             - uses: dtolnay/rust-toolchain@stable
             - name: build
-              run: cargo build --release --bin slint-compiler
+              run: cargo build --release --bin slint-compiler --bin slint-lsp
             - name: stage
               shell: bash
               run: |
                   mkdir -p dist
-                  cp "target/release/${{ matrix.bin }}" "dist/${{ matrix.bin }}"
+                  cp "target/release/slint-compiler${{ matrix.suffix }}" dist/
+                  cp "target/release/slint-lsp${{ matrix.suffix }}" dist/
             - uses: actions/upload-artifact@v7
               with:
-                  name: slint-compiler-${{ matrix.host }}
-                  path: dist/${{ matrix.bin }}
+                  name: host-binaries-${{ matrix.host }}
+                  path: dist/*
 
     release:
         name: publish release
-        needs: [library, compiler]
+        needs: [library, host-binaries]
         runs-on: ubuntu-22.04
         if: startsWith(github.ref, 'refs/tags/')
         permissions:
@@ -127,13 +133,17 @@ jobs:
               run: |
                   mkdir -p release
                   find artifacts -name "Slint-cpp-*.tar.gz" -exec cp {} release/ \;
+                  # Assets are named <tool>-<host>(.exe): the host tag has to be in the
+                  # filename because a release is one flat namespace.
                   for host in windows-x86_64 linux-x86_64 macos-aarch64; do
-                    src=$(find "artifacts/slint-compiler-$host" -type f | head -1)
-                    [ -z "$src" ] && continue
-                    case "$host" in
-                      windows-*) cp "$src" "release/slint-compiler-$host.exe" ;;
-                      *)         cp "$src" "release/slint-compiler-$host" ;;
-                    esac
+                    dir="artifacts/host-binaries-$host"
+                    [ -d "$dir" ] || continue
+                    case "$host" in windows-*) sfx=".exe" ;; *) sfx="" ;; esac
+                    for tool in slint-compiler slint-lsp; do
+                      src=$(find "$dir" -type f -name "$tool$sfx" | head -1)
+                      [ -z "$src" ] && continue
+                      cp "$src" "release/$tool-$host$sfx"
+                    done
                   done
                   ls -la release
             - uses: softprops/action-gh-release@v2
