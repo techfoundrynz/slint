@@ -525,11 +525,16 @@ pub fn compute_range_in_buffer(
 #[derive(Debug)]
 pub struct ArcCommand {
     /// Centre of the circle, relative to the span origin.
-    pub center_x: PhysicalLength,
-    pub center_y: PhysicalLength,
+    ///
+    /// Sub-pixel on purpose. The rasteriser is f32 throughout, and an integer centre cannot
+    /// sit in the middle of an even-sized element: a ring of integer radius R about an
+    /// integer centre is 2R+1 pixels across, so on a 2R wide screen the far column falls
+    /// outside and a full-width dial loses a pixel off one edge.
+    pub center_x: f32,
+    pub center_y: f32,
     /// Outer and inner edge of the stroke.
-    pub outer_radius: PhysicalLength,
-    pub inner_radius: PhysicalLength,
+    pub outer_radius: f32,
+    pub inner_radius: f32,
     pub color: PremultipliedRgbaColor,
     /// Unit vectors along the two boundary rays. A point is inside the wedge when it is on
     /// the inner side of both (or, for a reflex sweep, either).
@@ -549,9 +554,9 @@ pub struct ArcCommand {
     /// Round caps: a disc of half the stroke width centred on each end of the arc,
     /// unioned with the ring. Centres are relative to the span origin, like the circle's.
     pub round_caps: bool,
-    pub cap_radius: PhysicalLength,
-    pub start_cap: (PhysicalLength, PhysicalLength),
-    pub end_cap: (PhysicalLength, PhysicalLength),
+    pub cap_radius: f32,
+    pub start_cap: (f32, f32),
+    pub end_cap: (f32, f32),
 }
 
 #[derive(Debug)]

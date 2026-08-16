@@ -2467,27 +2467,25 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         // Cap centres sit on the stroke's centre line, at each end of the sweep.
         let cap_at = |a: f32| {
             (
-                PhysicalLength::new(
-                    (center_x + radius * num_traits::Float::cos(a) - clipped.origin.x as f32) as i16,
-                ),
-                PhysicalLength::new(
-                    (center_y + radius * num_traits::Float::sin(a) - clipped.origin.y as f32) as i16,
-                ),
+                center_x + radius * num_traits::Float::cos(a) - clipped.origin.x as f32,
+                center_y + radius * num_traits::Float::sin(a) - clipped.origin.y as f32,
             )
         };
 
+        // Everything below stays sub-pixel: the rasteriser is f32 anyway, and truncating the
+        // centre here forced a 2R+1 wide ring that could not be centred in an even element.
         let arc = ArcCommand {
-            center_x: PhysicalLength::new((center_x - clipped.origin.x as f32) as i16),
-            center_y: PhysicalLength::new((center_y - clipped.origin.y as f32) as i16),
-            outer_radius: PhysicalLength::new(outer as i16),
-            inner_radius: PhysicalLength::new((radius - half_stroke).max(0.) as i16),
+            center_x: center_x - clipped.origin.x as f32,
+            center_y: center_y - clipped.origin.y as f32,
+            outer_radius: outer,
+            inner_radius: (radius - half_stroke).max(0.),
             color: color.into(),
             start_dir: unit(start),
             end_dir: unit(end),
             reflex: sweep.abs() > 180.,
             full_circle: sweep.abs() >= 360.,
             round_caps: path.stroke_line_cap() == i_slint_core::items::LineCap::Round,
-            cap_radius: PhysicalLength::new(half_stroke as i16),
+            cap_radius: half_stroke,
             start_cap: cap_at(start),
             end_cap: cap_at(end),
         };

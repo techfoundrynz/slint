@@ -354,9 +354,9 @@ pub(super) fn draw_arc_line(
     }
 
     // Centre of this pixel row relative to the circle centre.
-    let dy = (line.get() - span.origin.y_length().get() - arc.center_y.get()) as f32 + 0.5;
-    let outer = arc.outer_radius.get() as f32;
-    let inner = arc.inner_radius.get().max(0) as f32;
+    let dy = (line.get() - span.origin.y_length().get()) as f32 + 0.5 - arc.center_y;
+    let outer = arc.outer_radius;
+    let inner = arc.inner_radius.max(0.);
     let dy_abs = if dy < 0. { -dy } else { dy };
     if dy_abs >= outer {
         return;
@@ -374,7 +374,7 @@ pub(super) fn draw_arc_line(
 
     // Circle centre in line-buffer coordinates. center_x is relative to the span origin,
     // and the buffer starts extra_left_clip pixels into the span.
-    let cx = (arc.center_x.get() - extra_left_clip) as f32;
+    let cx = arc.center_x - extra_left_clip as f32;
 
     // The row's runs before angular clipping. Without a hole the ring is one run.
     let mut runs: [(f32, f32); 2] = [(0., 0.); 2];
@@ -426,10 +426,10 @@ pub(super) fn draw_arc_line(
             if !arc.round_caps {
                 return false;
             }
-            let h = arc.cap_radius.get() as f32;
+            let h = arc.cap_radius;
             [arc.start_cap, arc.end_cap].iter().any(|cap| {
-                let cdx = dx - (cap.0.get() - arc.center_x.get()) as f32;
-                let cdy = dy - (cap.1.get() - arc.center_y.get()) as f32;
+                let cdx = dx - (cap.0 - arc.center_x);
+                let cdy = dy - (cap.1 - arc.center_y);
                 cdx * cdx + cdy * cdy <= h * h
             })
         };
@@ -442,10 +442,10 @@ pub(super) fn draw_arc_line(
             hi = hi.max(run.1);
         }
         if arc.round_caps {
-            let h = arc.cap_radius.get() as f32;
+            let h = arc.cap_radius;
             for cap in [arc.start_cap, arc.end_cap] {
-                let ccx = (cap.0.get() - extra_left_clip) as f32;
-                let cdy = dy - (cap.1.get() - arc.center_y.get()) as f32;
+                let ccx = cap.0 - extra_left_clip as f32;
+                let cdy = dy - (cap.1 - arc.center_y);
                 let half_chord = h * h - cdy * cdy;
                 if half_chord > 0. {
                     let half_chord = Float::sqrt(half_chord);
@@ -512,10 +512,10 @@ pub(super) fn draw_arc_line(
         // Round caps: a disc at each end of the sweep, which on this row is just another
         // span from the circle equation. A full circle has no ends.
         if arc.round_caps && !arc.full_circle {
-            let h = arc.cap_radius.get() as f32;
+            let h = arc.cap_radius;
             for cap in [arc.start_cap, arc.end_cap] {
-                let ccx = (cap.0.get() - extra_left_clip) as f32;
-                let dyc = dy - (cap.1.get() - arc.center_y.get()) as f32;
+                let ccx = cap.0 - extra_left_clip as f32;
+                let dyc = dy - (cap.1 - arc.center_y);
                 if dyc > -h && dyc < h {
                     let half = sqrt(h * h - dyc * dyc);
                     push(ccx - half, ccx + half);
@@ -1136,10 +1136,10 @@ mod arc_line_tests {
             (r.cos(), r.sin())
         };
         super::super::ArcCommand {
-            center_x: PhysicalLength::new(C),
-            center_y: PhysicalLength::new(C),
-            outer_radius: PhysicalLength::new(OUTER),
-            inner_radius: PhysicalLength::new(INNER),
+            center_x: C as f32,
+            center_y: C as f32,
+            outer_radius: OUTER as f32,
+            inner_radius: INNER as f32,
             // #ff8800, the gauge indicator colour. White quantises exactly in 565 and so
             // cannot show a rounding difference between the two fill paths.
             color: PremultipliedRgbaColor { alpha: 255, red: 255, green: 136, blue: 0 },
@@ -1148,9 +1148,9 @@ mod arc_line_tests {
             reflex: sweep_deg.abs() > 180.,
             full_circle: sweep_deg.abs() >= 360.,
             round_caps: false,
-            cap_radius: PhysicalLength::new((OUTER - INNER) / 2),
-            start_cap: (PhysicalLength::new(0), PhysicalLength::new(0)),
-            end_cap: (PhysicalLength::new(0), PhysicalLength::new(0)),
+            cap_radius: ((OUTER - INNER) / 2) as f32,
+            start_cap: (0., 0.),
+            end_cap: (0., 0.),
         }
     }
 
@@ -1225,10 +1225,7 @@ mod arc_line_tests {
         let mid = ((OUTER + INNER) / 2) as f32;
         let at = |d: f32| {
             let r = d.to_radians();
-            (
-                PhysicalLength::new((C as f32 + mid * r.cos()) as i16),
-                PhysicalLength::new((C as f32 + mid * r.sin()) as i16),
-            )
+            (C as f32 + mid * r.cos(), C as f32 + mid * r.sin())
         };
         a.start_cap = at(start_deg);
         a.end_cap = at(start_deg + sweep_deg);
