@@ -16,6 +16,23 @@ use integer_sqrt::IntegerSquareRoot;
 #[allow(unused_imports)]
 use num_traits::Float;
 
+/// Remainder wrapped into `[0, modulus)`.
+///
+/// Rust's `%` keeps the sign of the dividend, and every caller below casts the
+/// result to `usize` to index the texture, so a negative intermediate becomes
+/// ~4 billion and indexes far past the end of the bitmap. Observed on an
+/// esp32s3: a panic at `index is 4294967295` while blending a 144-byte (12x12)
+/// glyph alpha map, from `row.truncate() % source_size.height` returning -1.
+///
+/// A texture source coordinate is never legitimately negative, so wrap it into
+/// range rather than let the sign reach the cast. Sampling a wrapped row is a
+/// wrong pixel; the alternative is taking down the device.
+#[inline(always)]
+fn wrap_fixed(value: Fixed<i32, 8>, modulus: Fixed<i32, 8>) -> Fixed<i32, 8> {
+    let r = value % modulus;
+    if r.0 < 0 { Fixed(r.0 + modulus.0) } else { r }
+}
+
 /// Draw one line of the texture in the line buffer
 ///
 pub(super) fn draw_texture_line(
@@ -47,7 +64,8 @@ pub(super) fn draw_texture_line(
         let mut delta = dx;
         let row = off_y + dy * y;
         // The position where to start in the image array for a this row
-        let row_offset = (row.truncate() % source_size.height) as usize * pixel_stride as usize;
+        let row_offset =
+            row.truncate().rem_euclid(source_size.height) as usize * pixel_stride as usize;
         let mut tile_start = 0;
 
         // the size of the tile in physical pixels in the target
@@ -61,8 +79,10 @@ pub(super) fn draw_texture_line(
         // the accumulated error in image pixels
         let mut acc_err;
         if rotation.mirror_height() {
-            let o = (off_x + (delta * (extra_clip_end as i32 + len as i32 - 1)))
-                % Fixed::from_integer(source_size.width);
+            let o = wrap_fixed(
+                off_x + (delta * (extra_clip_end as i32 + len as i32 - 1)),
+                Fixed::from_integer(source_size.width),
+            );
             pos = o;
             tile_start = source_size.width;
             end = (o / delta) as usize + 1;
@@ -70,8 +90,10 @@ pub(super) fn draw_texture_line(
             delta = -delta;
             remainder = -remainder;
         } else {
-            let o =
-                (off_x + delta * extra_clip_begin as i32) % Fixed::from_integer(source_size.width);
+            let o = wrap_fixed(
+                off_x + delta * extra_clip_begin as i32,
+                Fixed::from_integer(source_size.width),
+            );
             pos = o;
             end = ((Fixed::from_integer(source_size.width) - o) / delta) as usize;
             acc_err = (Fixed::from_integer(source_size.width) - o) % delta;
@@ -119,7 +141,7 @@ pub(super) fn draw_texture_line(
         let bpp = format.bpp();
         let col = off_x + dx * y;
         let col_fract = col.fract();
-        let col = (col.truncate() % source_size.width) as usize * bpp;
+        let col = col.truncate().rem_euclid(source_size.width) as usize * bpp;
         let stride = pixel_stride as usize * bpp;
         let mut row_delta = dy;
         let tile_len = (Fixed::from_integer(source_size.height) / row_delta) as usize;
@@ -130,15 +152,19 @@ pub(super) fn draw_texture_line(
         let mut acc_err;
         if rotation.mirror_height() {
             row_init = Fixed::from_integer(source_size.height);
-            row = (off_y + (row_delta * (extra_clip_end as i32 + len as i32 - 1)))
-                % Fixed::from_integer(source_size.height);
+            row = wrap_fixed(
+                off_y + (row_delta * (extra_clip_end as i32 + len as i32 - 1)),
+                Fixed::from_integer(source_size.height),
+            );
             end = (row / row_delta) as usize + 1;
             acc_err = -row_delta + row % row_delta;
             row_delta = -row_delta;
             remainder = -remainder;
         } else {
-            row = (off_y + row_delta * extra_clip_begin as i32)
-                % Fixed::from_integer(source_size.height);
+            row = wrap_fixed(
+                off_y + row_delta * extra_clip_begin as i32,
+                Fixed::from_integer(source_size.height),
+            );
             end = ((Fixed::from_integer(source_size.height) - row) / row_delta) as usize;
             acc_err = (Fixed::from_integer(source_size.height) - row) % row_delta;
             if acc_err != Fixed::default() {
