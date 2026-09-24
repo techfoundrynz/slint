@@ -111,7 +111,7 @@ impl Scene {
                     break;
                 }
                 self.future_items_index += 1;
-                if item.pos.y_length() + item.size.height_length() < self.current_line {
+                if item.pos.y_length() + item.size.height_length() <= self.current_line {
                     continue;
                 }
                 self.items[i] = item;
@@ -631,4 +631,30 @@ pub struct ConicGradientCommand {
     /// Stored as f32 to avoid i16 saturation for off-bbox centers at high scale factors.
     pub center_x: f32,
     pub center_y: f32,
+}
+
+#[test]
+fn skipped_lines_exclude_items_at_their_bottom_edge() {
+    for bottom in [9, 10, 11] {
+        let mut dirty_region = PhysicalRegion { count: 2, ..Default::default() };
+        dirty_region.rectangles[0] = euclid::rect(0, 0, 20, 2).to_box2d();
+        dirty_region.rectangles[1] = euclid::rect(0, 10, 20, 2).to_box2d();
+        let item = SceneItem {
+            pos: PhysicalPoint::new(0, 4),
+            size: PhysicalSize::new(20, bottom - 4),
+            z: 0,
+            command: SceneCommand::RoundedRectangle { rectangle_index: 0 },
+        };
+        let mut scene = Scene::new(alloc::vec![item], SceneVectors::default(), dirty_region);
+        assert_eq!(scene.current_items_index, 0);
+        scene.next_line();
+        assert_eq!(scene.current_line.get(), 1);
+        scene.next_line();
+        assert_eq!(scene.current_line.get(), 10);
+        assert_eq!(scene.current_items_index, usize::from(bottom > 10), "bottom = {bottom}");
+        assert_eq!(scene.future_items_index, 1);
+        scene.next_line();
+        assert_eq!(scene.current_line.get(), 11);
+        assert_eq!(scene.current_items_index, 0);
+    }
 }
