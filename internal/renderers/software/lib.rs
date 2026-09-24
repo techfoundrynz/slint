@@ -2641,12 +2641,12 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
             euclid::point2((center_x - outer).floor() as i16, (center_y - outer).floor() as i16),
             euclid::size2((outer * 2.).ceil() as i16 + 2, (outer * 2.).ceil() as i16 + 2),
         );
-        let physical_clip = (self.current_state.clip.translate(self.current_state.offset.to_vector())
-            .cast()
-            * self.scale_factor)
-            .round()
-            .cast::<i16>()
-            .transformed(self.rotation);
+        let physical_clip =
+            (self.current_state.clip.translate(self.current_state.offset.to_vector()).cast()
+                * self.scale_factor)
+                .round()
+                .cast::<i16>()
+                .transformed(self.rotation);
         let Some(clipped) = bounds.intersection(&physical_clip) else {
             return true;
         };
@@ -2656,9 +2656,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         let start = (path.arc_start_angle() + self.rotation.orientation.angle()).to_radians();
         let sweep = path.arc_sweep_angle();
         let end = start + sweep.to_radians();
-        let unit = |a: f32| -> (f32, f32) {
-            (num_traits::Float::cos(a), num_traits::Float::sin(a))
-        };
+        let unit =
+            |a: f32| -> (f32, f32) { (num_traits::Float::cos(a), num_traits::Float::sin(a)) };
 
         // Cap centres sit on the stroke's centre line, at each end of the sweep.
         let cap_at = |a: f32| {

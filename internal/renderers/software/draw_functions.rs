@@ -303,10 +303,7 @@ pub(super) fn draw_texture_line(
                     for pix in line_buffer {
                         let pos = pos(1).0;
                         let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
-                            data[pos],
-                            cr,
-                            cg,
-                            cb,
+                            data[pos], cr, cg, cb,
                         ));
                         pix.blend(c);
                     }
@@ -388,9 +385,7 @@ pub(super) fn draw_arc_line(
         return;
     }
 
-    let sqrt = |v: f32| -> f32 {
-        if v <= 0. { 0. } else { Float::sqrt(v) }
-    };
+    let sqrt = |v: f32| -> f32 { if v <= 0. { 0. } else { Float::sqrt(v) } };
 
     // Half width of the ring at this row. The outer edge always exists here; the inner
     // edge only when the row passes through the hole.
@@ -486,10 +481,7 @@ pub(super) fn draw_arc_line(
             for x in from..to {
                 let px = x as f32 + 0.5;
                 let dx = px - cx;
-                let in_ring = runs
-                    .iter()
-                    .take(run_count)
-                    .any(|run| px >= run.0 && px <= run.1);
+                let in_ring = runs.iter().take(run_count).any(|run| px >= run.0 && px <= run.1);
                 if (in_ring && inside(dx)) || cap_covers(dx) {
                     line_buffer[x as usize].blend(arc.color);
                 }
@@ -509,7 +501,11 @@ pub(super) fn draw_arc_line(
                 span_count += 1;
             }
         };
-        let a = if arc.full_circle { (f32::NEG_INFINITY, f32::INFINITY) } else { half_plane(arc.start_dir) };
+        let a = if arc.full_circle {
+            (f32::NEG_INFINITY, f32::INFINITY)
+        } else {
+            half_plane(arc.start_dir)
+        };
         let b = if arc.full_circle {
             (f32::NEG_INFINITY, f32::INFINITY)
         } else {
@@ -1134,7 +1130,6 @@ impl PremultipliedRgbaColor {
     }
 }
 
-/// Trait for the pixels in the buffer
 #[cfg(test)]
 mod arc_line_tests {
     use super::*;
@@ -1204,14 +1199,9 @@ mod arc_line_tests {
     /// previous frame had it, which reads as a gap in the arc that repairs itself later.
     #[test]
     fn clipped_drawing_matches_full_width() {
-        for (start, sweep) in [
-            (140., 60.),
-            (140., 200.),
-            (330., 60.),
-            (45., 90.),
-            (0., 30.),
-            (170., 20.),
-        ] {
+        for (start, sweep) in
+            [(140., 60.), (140., 200.), (330., 60.), (45., 90.), (0., 30.), (170., 20.)]
+        {
             let a = arc(start, sweep);
             for row in [C - OUTER + 3, C - 120, C - 1, C, C + 1, C + 120, C + OUTER - 3] {
                 let full = painted(&a, row);
@@ -1307,8 +1297,10 @@ mod arc_line_tests {
             "{} clipped pixels differ in value from the full-width pass; first 10:
 {}",
             failures.len(),
-            failures.iter().take(10).cloned().collect::<Vec<_>>().join("
-")
+            failures.iter().take(10).cloned().collect::<Vec<_>>().join(
+                "
+"
+            )
         );
     }
 
@@ -1367,11 +1359,11 @@ mod arc_line_tests {
     fn the_row_a_horizontal_ray_passes_through_is_painted() {
         // Sweeps that put a ray exactly on the horizontal, from either side.
         for (start, sweep, expect_left, expect_right) in [
-            (0., 90., false, true),    // starts at 3 o'clock, sweeps down
-            (270., 90., false, true),  // ends at 3 o'clock
-            (180., 90., true, false),  // starts at 9 o'clock
-            (90., 90., true, false),   // ends at 9 o'clock
-            (180., 180., true, true),  // both tips on the row
+            (0., 90., false, true),   // starts at 3 o'clock, sweeps down
+            (270., 90., false, true), // ends at 3 o'clock
+            (180., 90., true, false), // starts at 9 o'clock
+            (90., 90., true, false),  // ends at 9 o'clock
+            (180., 180., true, true), // both tips on the row
             (0., 180., true, true),
         ] {
             let a = arc(start, sweep);
@@ -1450,6 +1442,7 @@ mod arc_line_tests {
     }
 }
 
+/// Trait for the pixels in the buffer
 pub trait TargetPixel: Sized + Copy {
     /// Blend a single pixel with a color
     fn blend(&mut self, color: PremultipliedRgbaColor);
