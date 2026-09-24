@@ -9,8 +9,8 @@
 //! through `foreach_ranges`.
 
 use slint::platform::software_renderer::{
-    LineBufferProvider, MinimalSoftwareWindow, RenderingRotation, RepaintBufferType,
-    Rgb565BigEndianPixel, Rgb565Pixel, TargetPixel,
+    DirtyRegionAlignment, LineBufferProvider, MinimalSoftwareWindow, RenderingRotation,
+    RepaintBufferType, Rgb565BigEndianPixel, Rgb565Pixel, TargetPixel,
 };
 use slint::platform::{PlatformError, WindowAdapter};
 use std::cell::RefCell;
@@ -273,6 +273,8 @@ fn run<P: TestPixel>(
             // turn off the narrowing this test exists to exercise.
             if first_frame {
                 r.set_rendering_rotation(rotation);
+                // The panel needs every draw-window coordinate even; see the check below.
+                r.set_dirty_region_alignment(DirtyRegionAlignment::new(2, 2));
             }
             let mut w = LineWriter { buffer: buf_p.as_mut_slice(), touched: Vec::new() };
             r.render_by_line(&mut w);
@@ -310,7 +312,11 @@ fn run<P: TestPixel>(
             }
             i += 1;
             assert_eq!(start % 2, 0, "line run {start}..={end} starts odd at step {step}");
-            assert_eq!((end - start + 1) % 2, 0, "line run {start}..={end} has odd height at step {step}");
+            assert_eq!(
+                (end - start + 1) % 2,
+                0,
+                "line run {start}..={end} has odd height at step {step}"
+            );
         }
 
         if let Some(diff) = compare(&buf_p, &buf_f) {
@@ -342,10 +348,9 @@ fn run<P: TestPixel>(
         "partial renderer repainted the whole screen on {full_frames} of {total} frames - narrowing is not active, so this test proves nothing"
     );
 
-    let checksum = buf_f
-        .iter()
-        .enumerate()
-        .fold(0u64, |acc, (i, p)| acc.wrapping_mul(31).wrapping_add((p.logical() as u64) ^ (i as u64)));
+    let checksum = buf_f.iter().enumerate().fold(0u64, |acc, (i, p)| {
+        acc.wrapping_mul(31).wrapping_add((p.logical() as u64) ^ (i as u64))
+    });
     (out, checksum)
 }
 
