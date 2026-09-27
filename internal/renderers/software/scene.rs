@@ -45,6 +45,7 @@ pub struct Scene {
 
     pub(super) current_line_ranges: Vec<core::ops::Range<i16>>,
     pub(super) range_valid_until_line: PhysicalLength,
+    pub(super) items_valid_until_line: PhysicalLength,
 }
 
 impl Scene {
@@ -68,8 +69,10 @@ impl Scene {
             dirty_region,
             current_line_ranges: Default::default(),
             range_valid_until_line: Default::default(),
+            items_valid_until_line: Default::default(),
         };
         r.recompute_ranges();
+        r.update_items_validity();
         debug_assert_eq!(r.current_line, r.dirty_region.bounding_rect().origin.y_length());
         r
     }
@@ -79,6 +82,10 @@ impl Scene {
         self.current_line += PhysicalLength::new(1);
 
         let skipped = self.current_line >= self.range_valid_until_line && self.recompute_ranges();
+
+        if self.current_line < self.items_valid_until_line {
+            return;
+        }
 
         // The items array is split in part:
         // 1. [0..i] are the items that have already been processed, that are on this line
@@ -119,6 +126,7 @@ impl Scene {
             }
             self.items[0..i].sort_unstable_by_key(|b| core::cmp::Reverse(b.z));
             self.current_items_index = i;
+            self.update_items_validity();
             return;
         }
 
@@ -205,10 +213,20 @@ impl Scene {
             i += 1;
         }
         self.current_items_index = i;
+        self.update_items_validity();
         // check that current items are properly sorted
         debug_assert!(
             self.items[0..self.current_items_index].array_windows().all(|[a, b]| a.z >= b.z)
         );
+    }
+
+    fn update_items_validity(&mut self) {
+        self.items_valid_until_line = self.items[..self.current_items_index]
+            .iter()
+            .map(|item| item.pos.y_length() + item.size.height_length())
+            .chain(self.items.get(self.future_items_index).map(|item| item.pos.y_length()))
+            .min()
+            .unwrap_or(PhysicalLength::new(i16::MAX));
     }
 
     // return true if lines were skipped
@@ -656,5 +674,43 @@ fn skipped_lines_exclude_items_at_their_bottom_edge() {
         scene.next_line();
         assert_eq!(scene.current_line.get(), 11);
         assert_eq!(scene.current_items_index, 0);
+    }
+}
+
+#[test]
+fn scanline_membership_matches_geometry() {
+    let mut seed = 0x59bca713u32;
+    let mut random = |limit: u32| {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        (seed % limit) as i16
+    };
+    for case in 0..128 {
+        let items: Vec<_> = (0..case % 81)
+            .map(|z| SceneItem {
+                pos: PhysicalPoint::new(0, random(160) - 20),
+                size: PhysicalSize::new(20, 1 + random(80)),
+                z: z as u16,
+                command: SceneCommand::RoundedRectangle { rectangle_index: 0 },
+            })
+            .collect();
+        let mut dirty_region = PhysicalRegion { count: 3, ..Default::default() };
+        dirty_region.rectangles[0] = euclid::rect(0, 0, 20, 25).to_box2d();
+        dirty_region.rectangles[1] = euclid::rect(0, 40, 20, 45).to_box2d();
+        dirty_region.rectangles[2] = euclid::rect(0, 110, 20, 50).to_box2d();
+        let mut scene = Scene::new(items.clone(), SceneVectors::default(), dirty_region);
+        while scene.current_line.get() < 160 {
+            let y = scene.current_line.get();
+            let mut expected: Vec<_> = items
+                .iter()
+                .filter(|item| item.pos.y <= y && y < item.pos.y + item.size.height)
+                .map(|item| item.z)
+                .collect();
+            expected.sort_unstable_by(|a, b| b.cmp(a));
+            let actual: Vec<_> =
+                scene.items[..scene.current_items_index].iter().map(|item| item.z).collect();
+            assert_eq!(actual, expected, "case {case}, row {y}");
+            assert!(scene.items[scene.future_items_index..].iter().all(|item| item.pos.y > y));
+            scene.next_line();
+        }
     }
 }

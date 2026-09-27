@@ -1635,8 +1635,21 @@ fn render_window_frame_by_line(
     // FIXME gradient
     TargetPixel::blend(&mut background_color, background.color().into());
 
+    let mut first_covers = [None; PHYSICAL_REGION_MAX_SIZE];
+    let mut covers_valid_until = scene.current_line;
     while scene.current_line < to_draw_tr.origin.y_length() + to_draw_tr.size.height_length() {
-        for r in &scene.current_line_ranges {
+        if scene.current_line >= covers_valid_until {
+            let items = &scene.items[..scene.current_items_index];
+            for (index, r) in scene.current_line_ranges.iter().enumerate() {
+                first_covers[index] = items.iter().position(|span| {
+                    span.pos.x <= r.start
+                        && span.pos.x + span.size.width >= r.end
+                        && scene.is_guaranteed_opaque(&span.command)
+                });
+            }
+            covers_valid_until = scene.range_valid_until_line.min(scene.items_valid_until_line);
+        }
+        for (range_index, r) in scene.current_line_ranges.iter().enumerate() {
             line_buffer.process_line(
                 scene.current_line.get() as usize,
                 r.start as usize..r.end as usize,
@@ -1647,11 +1660,7 @@ fn render_window_frame_by_line(
                     // A span that opaquely covers the whole range hides
                     // everything behind it, background included. Draw from the
                     // frontmost such span and drop the rest.
-                    let first_cover = items.iter().position(|span| {
-                        span.pos.x <= r.start
-                            && span.pos.x + span.size.width >= r.end
-                            && scene.is_guaranteed_opaque(&span.command)
-                    });
+                    let first_cover = first_covers[range_index];
                     let items = match first_cover {
                         Some(i) => &items[..=i],
                         None => {

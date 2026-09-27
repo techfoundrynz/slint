@@ -351,6 +351,30 @@ pub(super) fn draw_texture_line(
     }
 }
 
+#[inline]
+fn arc_span_is_empty(
+    arc: &super::ArcCommand,
+    dy: f32,
+    cx: f32,
+    width: i32,
+    extra_left_clip: i16,
+) -> bool {
+    // Telemetry labels often repaint only the hollow center of a large dial.
+    // Leave a pixel of slack around the ring and cap bounds for fractional coverage.
+    let far_x = cx.abs().max((width as f32 - cx).abs());
+    let safe_inner = arc.inner_radius - 1.;
+    safe_inner > 0.
+        && far_x * far_x + dy * dy < safe_inner * safe_inner
+        && (!arc.round_caps
+            || arc.full_circle
+            || [arc.start_cap, arc.end_cap].iter().all(|cap| {
+                let cap_x = cap.0 - extra_left_clip as f32;
+                let cap_dy = dy - (cap.1 - arc.center_y);
+                let h = arc.cap_radius + 1.;
+                cap_dy.abs() > h || cap_x + h < 0. || cap_x - h > width as f32
+            }))
+}
+
 /// Draw one line of a stroked circular arc into the line buffer.
 ///
 /// Coverage comes from the circle equation rather than from a rasterized mask, so the only
@@ -385,6 +409,11 @@ pub(super) fn draw_arc_line(
         return;
     }
 
+    let cx = arc.center_x - extra_left_clip as f32;
+    if arc_span_is_empty(arc, dy, cx, width, extra_left_clip) {
+        return;
+    }
+
     let sqrt = |v: f32| -> f32 { if v <= 0. { 0. } else { Float::sqrt(v) } };
 
     // Half width of the ring at this row. The outer edge always exists here; the inner
@@ -392,10 +421,6 @@ pub(super) fn draw_arc_line(
     let half_outer = sqrt(outer * outer - dy * dy);
     let has_hole = dy_abs < inner;
     let half_inner = if has_hole { sqrt(inner * inner - dy * dy) } else { 0. };
-
-    // Circle centre in line-buffer coordinates. center_x is relative to the span origin,
-    // and the buffer starts extra_left_clip pixels into the span.
-    let cx = arc.center_x - extra_left_clip as f32;
 
     // The row's runs before angular clipping. Without a hole the ring is one run.
     let mut runs: [(f32, f32); 2] = [(0., 0.); 2];
@@ -1302,6 +1327,54 @@ mod arc_line_tests {
 "
             )
         );
+    }
+
+    #[test]
+    fn empty_center_culling_preserves_fractional_arcs() {
+        let mut culled_spans = 0;
+        for (start, sweep) in [(0., 180.), (0.1, 259.9), (89.9, 200.), (140., 360.)] {
+            for (dx, dy) in [(0.125, 0.375), (-0.49, 0.51), (0.8, -0.2)] {
+                for round_caps in [false, true] {
+                    let mut a = arc_round(start, sweep);
+                    a.round_caps = round_caps;
+                    a.center_x += dx;
+                    a.center_y += dy;
+                    a.outer_radius += 0.3;
+                    a.inner_radius += 0.3;
+                    let radius = (a.outer_radius + a.inner_radius) / 2.;
+                    let cap = |angle: f32| {
+                        let angle = angle.to_radians();
+                        (a.center_x + radius * angle.cos(), a.center_y + radius * angle.sin())
+                    };
+                    a.start_cap = cap(start);
+                    a.end_cap = cap(start + sweep);
+                    a.color = PremultipliedRgbaColor { red: 91, green: 73, blue: 52, alpha: 127 };
+                    for row in 0..W as i16 {
+                        let full = row_values(&a, row, 0, W);
+                        for from in (0..W).step_by(17) {
+                            for len in [1, 2, 17, 70, 151] {
+                                let to = (from + len).min(W);
+                                if arc_span_is_empty(
+                                    &a,
+                                    row as f32 + 0.5 - a.center_y,
+                                    a.center_x - from as f32,
+                                    (to - from) as i32,
+                                    from as i16,
+                                ) {
+                                    culled_spans += 1;
+                                    assert!(
+                                        full[from..to].iter().all(|pixel| *pixel == 0),
+                                        "culled visible pixels: start={start} sweep={sweep} shift={dx},{dy} caps={round_caps} row={row} span={from}..{to}"
+                                    );
+                                    assert_eq!(row_values(&a, row, from, to), full[from..to]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(culled_spans > 100_000);
     }
 
     fn contiguous_groups(xs: &[usize]) -> Vec<(usize, usize)> {
