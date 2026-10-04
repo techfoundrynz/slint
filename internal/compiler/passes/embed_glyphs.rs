@@ -157,6 +157,51 @@ pub fn embed_glyphs(
         }
     }
 
+    // Per-family glyph plan: SLINT_FONT_PLAN="Family=19/21/93:0123456789. ;icons=@own/27".
+    // A listed family is rasterized only at the given sizes; a size may carry an
+    // explicit character set after ':' (other characters keep their advance but embed
+    // no bitmap). The '@own' flag drops fallback-font coverage so icon fonts embed
+    // only their own glyphs. Unlisted families keep the global sizes with full
+    // character coverage.
+    struct FamilyPlan {
+        own_glyphs: bool,
+        sizes: Vec<(i16, Option<String>)>,
+    }
+    let mut font_plan: std::collections::HashMap<String, FamilyPlan> = Default::default();
+    if let Ok(plan_str) = std::env::var("SLINT_FONT_PLAN") {
+        for family_entry in plan_str.split(';').filter(|e| !e.trim().is_empty()) {
+            let Some((family, spec)) = family_entry.split_once('=') else {
+                diag.push_error(
+                    format!("Invalid entry '{family_entry}' in `SLINT_FONT_PLAN`, expected 'family=size[:chars][/size[:chars]...]'"),
+                    &generic_diag_location,
+                );
+                return;
+            };
+            let mut plan = FamilyPlan { own_glyphs: false, sizes: Vec::new() };
+            for token in spec.split('/').filter(|t| !t.is_empty()) {
+                if token.trim() == "@own" {
+                    plan.own_glyphs = true;
+                    continue;
+                }
+                let (size_str, chars) = match token.split_once(':') {
+                    Some((size_str, chars)) => (size_str, Some(chars.to_string())),
+                    None => (token, None),
+                };
+                match size_str.trim().parse::<f32>() {
+                    Ok(size) => plan.sizes.push(((size * scale_factor) as i16, chars)),
+                    Err(_) => {
+                        diag.push_error(
+                            format!("Invalid font size '{size_str}' in `SLINT_FONT_PLAN`"),
+                            &generic_diag_location,
+                        );
+                        return;
+                    }
+                }
+            }
+            font_plan.insert(family.trim().to_lowercase(), plan);
+        }
+    }
+
     let fallback_fonts = get_fallback_fonts();
 
     // The collection (system fonts + imported fonts) is built once and shared with
@@ -296,6 +341,12 @@ pub fn embed_glyphs(
             );
             return;
         };
+        let (family_sizes, own_glyphs): (Vec<(i16, Option<String>)>, bool) =
+            match font_plan.get(&family_name.to_lowercase()) {
+                Some(plan) => (plan.sizes.clone(), plan.own_glyphs),
+                None => (pixel_sizes.iter().map(|size| (*size, None)).collect(), false),
+            };
+
         let axes = font_ref.axes();
         let wght_axis = axes.iter().find(|axis| axis.tag() == skrifa::Tag::new(b"wght"));
 
@@ -314,7 +365,8 @@ pub fn embed_glyphs(
                 let embedded = embed_font(
                     family_name.to_owned(),
                     Font { font: font.clone() },
-                    &pixel_sizes,
+                    &family_sizes,
+                    own_glyphs,
                     characters_seen.iter().cloned(),
                     &fallback_fonts,
                     compiler_config,
@@ -329,7 +381,8 @@ pub fn embed_glyphs(
             let embedded = embed_font(
                 family_name.to_owned(),
                 Font { font: font.clone() },
-                &pixel_sizes,
+                &family_sizes,
+                own_glyphs,
                 characters_seen.iter().cloned(),
                 &fallback_fonts,
                 compiler_config,
@@ -377,7 +430,8 @@ fn get_fallback_fonts() -> Vec<Font> {
 fn embed_font(
     family_name: String,
     font: Font,
-    pixel_sizes: &[i16],
+    pixel_sizes: &[(i16, Option<String>)],
+    own_glyphs: bool,
     character_coverage: impl Iterator<Item = char>,
     fallback_fonts: &[Font],
     _compiler_config: &CompilerConfiguration,
@@ -386,6 +440,10 @@ fn embed_font(
     override_weight: Option<u16>,
 ) -> BitmapFont {
     let coords_i16: Vec<i16> = normalized_coords.iter().map(|c| c.to_bits()).collect();
+
+    // With own_glyphs the family embeds only what its own cmap covers; no
+    // fallback-font glyphs are pulled in (keeps icon fonts free of Latin bitmaps)
+    let fallback_fonts: &[Font] = if own_glyphs { &[] } else { fallback_fonts };
 
     let mut character_map: Vec<CharacterMapEntry> = character_coverage
         .filter(|code_point| {
@@ -403,7 +461,8 @@ fn embed_font(
 
     #[cfg(feature = "sdf-fonts")]
     let glyphs = if _compiler_config.use_sdf_fonts {
-        embed_sdf_glyphs(pixel_sizes, &character_map, &font, fallback_fonts, _variations)
+        let plain_sizes: Vec<i16> = pixel_sizes.iter().map(|(size, _)| *size).collect();
+        embed_sdf_glyphs(&plain_sizes, &character_map, &font, fallback_fonts, _variations)
     } else {
         embed_alpha_map_glyphs(pixel_sizes, &character_map, &font, fallback_fonts, &coords_i16)
     };
@@ -439,7 +498,7 @@ fn embed_font(
 
 #[cfg(not(target_arch = "wasm32"))]
 fn embed_alpha_map_glyphs(
-    pixel_sizes: &[i16],
+    pixel_sizes: &[(i16, Option<String>)],
     character_map: &Vec<CharacterMapEntry>,
     font: &Font,
     fallback_fonts: &[Font],
@@ -455,7 +514,7 @@ fn embed_alpha_map_glyphs(
 
     pixel_sizes
         .par_iter()
-        .map(|pixel_size| {
+        .map(|(pixel_size, plan_chars)| {
             let glyph_data = character_map
                 .par_iter()
                 .map(|CharacterMapEntry { code_point, .. }| {
@@ -471,17 +530,11 @@ fn embed_alpha_map_glyphs(
                     let scale = *pixel_size as f32 / fm.units_per_em as f32;
                     let advance_width = gm.advance_width(glyph_id) * scale;
 
-                    // Embed only the configured characters above a pixel size threshold. A
+                    // Embed only the characters the SLINT_FONT_PLAN allows at this size. A
                     // full charset at large sizes costs more flash than an MCU target can
                     // spare, and large text is typically numeric readouts. The advance width
                     // is still emitted so layout is unaffected; only the bitmap is dropped.
-                    let limit_threshold = std::env::var("SLINT_LIMIT_GLYPHS_THRESHOLD")
-                        .ok()
-                        .and_then(|val| val.parse::<i16>().ok())
-                        .unwrap_or(125);
-                    let limit_chars = std::env::var("SLINT_LIMIT_GLYPHS_CHARS")
-                        .unwrap_or_else(|_| "0123456789., ".to_string());
-                    if *pixel_size > limit_threshold && !limit_chars.contains(*code_point) {
+                    if plan_chars.as_ref().is_some_and(|chars| !chars.contains(*code_point)) {
                         return BitmapGlyph {
                             x: 0,
                             y: 0,
