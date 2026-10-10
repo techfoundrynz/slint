@@ -125,6 +125,12 @@ impl DrawTextureArgs {
                         stride,
                         size,
                     ),
+                    SharedBufferData::CachedAlphaMap { data, .. } => TextureData::new(
+                        &data[start..end],
+                        TexturePixelFormat::AlphaMap,
+                        stride,
+                        size,
+                    ),
                 }
             }
         }

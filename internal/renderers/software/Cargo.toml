@@ -30,6 +30,7 @@ path = ["dep:zeno", "dep:lyon_path", "i-slint-core/path"]
 std = ["zeno?/std", "num-traits/std", "euclid/std", "i-slint-core/std", "path", "systemfonts", "swash?/std"]
 libm = ["zeno?/libm", "num-traits/libm", "euclid/libm", "i-slint-core/libm", "swash?/libm"]
 
+embedded-caches = []
 experimental = []
 # Exposes additional APIS that aren't public but required for integration testing.
 testing = ["i-slint-core/testing"]

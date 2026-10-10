@@ -1,0 +1,22 @@
+# Copyright © SixtyFPS GmbH <info@slint.dev>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+cmake_minimum_required(VERSION 3.21)
+set(SLINT_FEATURE_FREESTANDING ON)
+include(${CMAKE_CURRENT_LIST_DIR}/../cmake/SlintFeatures.cmake)
+if(SLINT_FEATURE_SOFTWARE_RENDERER_CACHES OR "software-renderer-caches" IN_LIST features)
+    message(FATAL_ERROR "Software caches must be opt-in")
+endif()
+set(SLINT_FEATURE_SOFTWARE_RENDERER_CACHES ON)
+set(features "")
+include(${CMAKE_CURRENT_LIST_DIR}/../cmake/SlintFeatures.cmake)
+if(NOT "software-renderer-caches" IN_LIST features)
+    message(FATAL_ERROR "CMake did not forward the cache feature to Cargo")
+endif()
+set(SLINT_FEATURE_RENDERER_SOFTWARE OFF)
+set(features "")
+include(${CMAKE_CURRENT_LIST_DIR}/../cmake/SlintFeatures.cmake)
+if(SLINT_FEATURE_SOFTWARE_RENDERER_CACHES OR "software-renderer-caches" IN_LIST features)
+    message(FATAL_ERROR "Software caches must follow the renderer dependency")
+endif()
+message(STATUS "Software cache feature mapping passed")

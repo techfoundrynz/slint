@@ -1,0 +1,22 @@
+[package]
+name = "software-renderer-cache-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[features]
+default = ["caches"]
+caches = ["slint/software-renderer-caches"]
+vector-fonts = []
+sdf-fonts = ["slint-build/sdf-fonts"]
+[workspace]
+[[test]]
+name = "cache"
+path = "cache.rs"
+[[test]]
+name = "arc_partial_repaint"
+path = "../../api/rs/slint/tests/arc_partial_repaint.rs"
+[dependencies]
+slint = { path = "../../api/rs/slint", default-features = false, features = ["std", "renderer-software", "compat-1-2"] }
+i-slint-renderer-software = { path = "../../internal/renderers/software", features = ["testing"] }
+[build-dependencies]
+slint-build = { path = "../../api/rs/build" }

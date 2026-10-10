@@ -16,6 +16,7 @@ extern crate alloc;
 extern crate std;
 
 mod draw_functions;
+mod embedded_text_cache;
 mod fixed;
 mod fonts;
 mod minimal_software_window;
@@ -692,6 +693,7 @@ impl<'a, T: TargetPixel> target_pixel_buffer::TargetPixelBuffer for TargetPixelS
 ///     is only useful if the device does not have enough memory to render the whole window
 ///     in one single buffer
 pub struct SoftwareRenderer {
+    embedded_text_cache: RefCell<embedded_text_cache::TextCache>,
     repaint_buffer_type: Cell<RepaintBufferType>,
     dirty_region_alignment: Cell<DirtyRegionAlignment>,
     /// This is the area which was dirty on the previous frame.
@@ -708,6 +710,7 @@ pub struct SoftwareRenderer {
 impl Default for SoftwareRenderer {
     fn default() -> Self {
         Self {
+            embedded_text_cache: Default::default(),
             partial_rendering_state: Default::default(),
             prev_frame_dirty: Default::default(),
             dirty_region_alignment: Default::default(),
@@ -723,6 +726,24 @@ impl Default for SoftwareRenderer {
 
 #[cfg(feature = "testing")]
 impl SoftwareRenderer {
+    /// Enables or disables embedded text layout reuse for renderer tests.
+    pub fn set_embedded_text_cache_enabled(&self, enabled: bool) {
+        let mut cache = self.embedded_text_cache.borrow_mut();
+        cache.clear();
+        cache.disabled = !enabled;
+    }
+    /// Returns the number of reused embedded text layouts since the cache was cleared.
+    pub fn embedded_text_cache_hits(&self) -> usize {
+        self.embedded_text_cache.borrow().hits
+    }
+    /// Returns the number of retained text masks and their payload bytes.
+    pub fn embedded_text_mask_stats(&self) -> (usize, usize) {
+        self.embedded_text_cache.borrow().mask_stats()
+    }
+    /// Returns the number of cached layouts and their accounted payload bytes.
+    pub fn embedded_text_cache_stats(&self) -> (usize, usize) {
+        self.embedded_text_cache.borrow().stats()
+    }
     /// Returns a reference to the text layout cache for testing purposes.
     pub fn text_layout_cache(&self) -> &sharedparley::TextLayoutCache {
         &self.text_layout_cache
@@ -883,6 +904,7 @@ impl SoftwareRenderer {
                 scale_factor: factor,
             },
             rotation,
+            &self.embedded_text_cache,
             #[cfg(feature = "systemfonts")]
             &self.text_layout_cache,
         );
@@ -1462,6 +1484,7 @@ impl RendererSealed for SoftwareRenderer {
     ) -> Result<(), i_slint_core::platform::PlatformError> {
         #[cfg(feature = "systemfonts")]
         self.text_layout_cache.component_destroyed(component);
+        self.embedded_text_cache.borrow_mut().clear();
         self.partial_rendering_state.free_graphics_resources(component, items);
         Ok(())
     }
@@ -1471,6 +1494,7 @@ impl RendererSealed for SoftwareRenderer {
     }
 
     fn register_bitmap_font(&self, font_data: &'static i_slint_core::graphics::BitmapFont) {
+        self.embedded_text_cache.borrow_mut().clear();
         fonts::register_bitmap_font(font_data);
     }
 
@@ -1497,6 +1521,7 @@ impl RendererSealed for SoftwareRenderer {
     }
 
     fn set_window_adapter(&self, window_adapter: &Rc<dyn WindowAdapter>) {
+        self.embedded_text_cache.borrow_mut().clear();
         *self.maybe_window_adapter.borrow_mut() = Some(Rc::downgrade(window_adapter));
         #[cfg(feature = "systemfonts")]
         self.text_layout_cache.clear_all();
@@ -1798,6 +1823,7 @@ fn prepare_scene(
         window,
         PrepareScene { scale_factor: factor, ..Default::default() },
         software_renderer.rotation.get(),
+        &software_renderer.embedded_text_cache,
         #[cfg(feature = "systemfonts")]
         &software_renderer.text_layout_cache,
     );
@@ -2582,6 +2608,7 @@ impl ProcessScene for PrepareScene {
 }
 
 struct SceneBuilder<'a, T> {
+    embedded_text_cache: &'a RefCell<embedded_text_cache::TextCache>,
     processor: T,
     state_stack: Vec<RenderState>,
     current_state: RenderState,
@@ -2703,10 +2730,12 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
         window: &'a WindowInner,
         processor: T,
         orientation: RenderingRotation,
+        embedded_text_cache: &'a RefCell<embedded_text_cache::TextCache>,
         #[cfg(feature = "systemfonts")] text_layout_cache: &'a sharedparley::TextLayoutCache,
     ) -> Self {
         Self {
             processor,
+            embedded_text_cache,
             state_stack: Vec::new(),
             current_state: RenderState {
                 alpha: 1.,
@@ -2993,112 +3022,131 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                             _ => color,
                         };
 
-                        let Some(clipped_target) = physical_clip.intersection(&target_rect) else {
-                            continue;
-                        };
-
-                        let data = match &glyph.alpha_map {
-                            fonts::GlyphAlphaMap::Static(data) => {
-                                if glyph.sdf {
-                                    let geometry = clipped_target.translate(offset).round();
-                                    let origin =
-                                        (geometry.origin - offset.round()).round().cast::<i16>();
-                                    let off_x = origin.x - target_rect.origin.x as i16;
-                                    let off_y = origin.y - target_rect.origin.y as i16;
-                                    let pixel_stride = glyph.pixel_stride;
-                                    let mut geometry = geometry.cast();
-                                    if geometry.size.width > glyph.width.get() - off_x {
-                                        geometry.size.width = glyph.width.get() - off_x
-                                    }
-                                    if geometry.size.height > glyph.height.get() - off_y {
-                                        geometry.size.height = glyph.height.get() - off_y
-                                    }
-                                    let source_size = geometry.size;
-                                    if source_size.is_empty() {
-                                        continue;
-                                    }
-
-                                    let delta32 = Fixed::<i32, 8>::from_fixed(scale_delta);
-                                    let normalize = |x: Fixed<i32, 8>| {
-                                        if x < Fixed::from_integer(0) {
-                                            x + Fixed::from_integer(1)
-                                        } else {
-                                            x
-                                        }
-                                    };
-                                    let fract_x = normalize(
-                                        (-glyph.x) - Fixed::from_integer(gl_x.get() as _),
-                                    );
-                                    let off_x = delta32 * off_x as i32 + fract_x;
-                                    let fract_y =
-                                        normalize(glyph.y - Fixed::from_integer(gl_y.get() as _));
-                                    let off_y = delta32 * off_y as i32 + fract_y;
-                                    let texture = SceneTexture {
-                                        data,
-                                        pixel_stride,
-                                        format: TexturePixelFormat::SignedDistanceField,
-                                        extra: SceneTextureExtra {
-                                            colorize: color,
-                                            // color already is mixed with global alpha
-                                            alpha: color.alpha(),
-                                            rotation: self.rotation.orientation,
-                                            dx: scale_delta,
-                                            dy: scale_delta,
-                                            off_x: Fixed::try_from_fixed(off_x).unwrap(),
-                                            off_y: Fixed::try_from_fixed(off_y).unwrap(),
-                                        },
-                                    };
-                                    self.processor.process_scene_texture(
-                                        geometry.transformed(self.rotation),
-                                        texture,
-                                    );
-                                    continue;
-                                };
-
-                                target_pixel_buffer::TextureDataContainer::Static(
-                                    target_pixel_buffer::TextureData::new(
-                                        data,
-                                        TexturePixelFormat::AlphaMap,
-                                        glyph.pixel_stride as usize,
-                                        euclid::size2(glyph.width.get(), glyph.height.get()).cast(),
-                                    ),
-                                )
-                            }
-                            fonts::GlyphAlphaMap::Shared(data) => {
-                                let source_rect = euclid::rect(0, 0, glyph.width.0, glyph.height.0);
-                                target_pixel_buffer::TextureDataContainer::Shared {
-                                    buffer: SharedBufferData::AlphaMap {
-                                        data: data.clone(),
-                                        width: glyph.pixel_stride,
-                                    },
-                                    source_rect,
-                                }
-                            }
-                        };
-                        let clipped_target =
-                            clipped_target.translate(offset).round().transformed(self.rotation);
-                        let target_rect =
-                            target_rect.translate(offset).round().transformed(self.rotation);
-                        let t = target_pixel_buffer::DrawTextureArgs {
-                            data,
-                            colorize: Some(color),
-                            // color already is mixed with global alpha
-                            alpha: color.alpha(),
-                            dst_x: target_rect.origin.x as _,
-                            dst_y: target_rect.origin.y as _,
-                            dst_width: target_rect.size.width as _,
-                            dst_height: target_rect.size.height as _,
-                            rotation: self.rotation.orientation,
-                            tiling: None,
-                        };
-
-                        self.processor.process_target_texture(&t, clipped_target.cast());
+                        self.draw_prepared_glyph(
+                            &glyph,
+                            target_rect,
+                            physical_clip,
+                            offset,
+                            color,
+                            scale_delta,
+                        );
                     }
                     core::ops::ControlFlow::Continue(())
                 },
                 selection.as_ref().map(|s| s.selection.clone()),
             )
             .ok();
+    }
+
+    fn draw_prepared_glyph(
+        &mut self,
+        glyph: &fonts::RenderableGlyph,
+        target_rect: euclid::Rect<f32, PhysicalPx>,
+        physical_clip: euclid::Rect<f32, PhysicalPx>,
+        offset: euclid::Vector2D<f32, PhysicalPx>,
+        color: Color,
+        scale_delta: Fixed<u16, 8>,
+    ) {
+        let Some(clipped_target) = physical_clip.intersection(&target_rect) else {
+            return;
+        };
+
+        let data = match &glyph.alpha_map {
+            fonts::GlyphAlphaMap::Static(data) => {
+                if glyph.sdf {
+                    let gl_x = PhysicalLength::new((-glyph.x).truncate() as i16);
+                    let gl_y = PhysicalLength::new(glyph.y.truncate() as i16);
+                    let geometry = clipped_target.translate(offset).round();
+                    let origin = (geometry.origin - offset.round()).round().cast::<i16>();
+                    let off_x = origin.x - target_rect.origin.x as i16;
+                    let off_y = origin.y - target_rect.origin.y as i16;
+                    let pixel_stride = glyph.pixel_stride;
+                    let mut geometry = geometry.cast();
+                    if geometry.size.width > glyph.width.get() - off_x {
+                        geometry.size.width = glyph.width.get() - off_x
+                    }
+                    if geometry.size.height > glyph.height.get() - off_y {
+                        geometry.size.height = glyph.height.get() - off_y
+                    }
+                    let source_size = geometry.size;
+                    if source_size.is_empty() {
+                        return;
+                    }
+
+                    let delta32 = Fixed::<i32, 8>::from_fixed(scale_delta);
+                    let normalize = |x: Fixed<i32, 8>| {
+                        if x < Fixed::from_integer(0) { x + Fixed::from_integer(1) } else { x }
+                    };
+                    let fract_x = normalize((-glyph.x) - Fixed::from_integer(gl_x.get() as _));
+                    let off_x = delta32 * off_x as i32 + fract_x;
+                    let fract_y = normalize(glyph.y - Fixed::from_integer(gl_y.get() as _));
+                    let off_y = delta32 * off_y as i32 + fract_y;
+                    let texture = SceneTexture {
+                        data,
+                        pixel_stride,
+                        format: TexturePixelFormat::SignedDistanceField,
+                        extra: SceneTextureExtra {
+                            colorize: color,
+                            // color already is mixed with global alpha
+                            alpha: color.alpha(),
+                            rotation: self.rotation.orientation,
+                            dx: scale_delta,
+                            dy: scale_delta,
+                            off_x: Fixed::try_from_fixed(off_x).unwrap(),
+                            off_y: Fixed::try_from_fixed(off_y).unwrap(),
+                        },
+                    };
+                    self.processor
+                        .process_scene_texture(geometry.transformed(self.rotation), texture);
+                    return;
+                };
+
+                target_pixel_buffer::TextureDataContainer::Static(
+                    target_pixel_buffer::TextureData::new(
+                        data,
+                        TexturePixelFormat::AlphaMap,
+                        glyph.pixel_stride as usize,
+                        euclid::size2(glyph.width.get(), glyph.height.get()).cast(),
+                    ),
+                )
+            }
+            fonts::GlyphAlphaMap::Shared(data) => {
+                let source_rect = euclid::rect(0, 0, glyph.width.0, glyph.height.0);
+                target_pixel_buffer::TextureDataContainer::Shared {
+                    buffer: SharedBufferData::AlphaMap {
+                        data: data.clone(),
+                        width: glyph.pixel_stride,
+                    },
+                    source_rect,
+                }
+            }
+            fonts::GlyphAlphaMap::Cached(data) => {
+                let source_rect = euclid::rect(0, 0, glyph.width.0, glyph.height.0);
+                target_pixel_buffer::TextureDataContainer::Shared {
+                    buffer: SharedBufferData::CachedAlphaMap {
+                        data: data.clone(),
+                        width: glyph.pixel_stride,
+                    },
+                    source_rect,
+                }
+            }
+        };
+        let clipped_target = clipped_target.translate(offset).round().transformed(self.rotation);
+        let target_rect = target_rect.translate(offset).round().transformed(self.rotation);
+        let t = target_pixel_buffer::DrawTextureArgs {
+            data,
+            colorize: Some(color),
+            // color already is mixed with global alpha
+            alpha: color.alpha(),
+            dst_x: target_rect.origin.x as _,
+            dst_y: target_rect.origin.y as _,
+            dst_width: target_rect.size.width as _,
+            dst_height: target_rect.size.height as _,
+            rotation: self.rotation.orientation,
+            tiling: None,
+        };
+
+        self.processor.process_target_texture(&t, clipped_target.cast());
     }
 
     /// Returns the color, mixed with the current_state's alpha
@@ -3343,6 +3391,15 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         let (horizontal_alignment, vertical_alignment) = text.alignment();
         let max_lines = text.line_limit();
 
+        let bitmap_identity = match &font {
+            fonts::Font::PixelFont(f) if !f.bitmap_font.sdf => Some((
+                f.bitmap_font as *const _ as usize,
+                f.glyphs as *const _ as usize,
+                f.pixel_size.get(),
+                f.scale_delta(),
+            )),
+            _ => None,
+        };
         with_font!(&font, |font| {
             let layout = fonts::text_layout_for_font(font, &font_request, self.scale_factor);
             let paragraph = TextParagraphLayout {
@@ -3358,6 +3415,45 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
                 max_lines,
             };
 
+            if let (
+                Some((bitmap, glyphs, pixel_size, scale_delta)),
+                PlainOrStyledText::Plain(content),
+            ) = (bitmap_identity, &content)
+            {
+                let key = embedded_text_cache::TextKey {
+                    text: content.clone(),
+                    request: font_request.clone(),
+                    bitmap,
+                    glyphs,
+                    pixel_size,
+                    scale: self.scale_factor.get().to_bits(),
+                    size: max_size,
+                    horizontal_alignment,
+                    vertical_alignment,
+                    wrap: paragraph.wrap,
+                    overflow: paragraph.overflow,
+                    max_lines,
+                };
+                let prepared = self.embedded_text_cache.borrow_mut().get_or_insert(
+                    key,
+                    &paragraph,
+                    font,
+                    self.window.context(),
+                );
+                if let Some(prepared) = prepared {
+                    for glyph in &prepared.glyphs {
+                        self.draw_prepared_glyph(
+                            &glyph.glyph,
+                            glyph.rect,
+                            physical_clip,
+                            offset,
+                            color,
+                            scale_delta,
+                        );
+                    }
+                    return;
+                }
+            }
             self.draw_text_paragraph(&paragraph, physical_clip, offset, color, None);
         });
     }

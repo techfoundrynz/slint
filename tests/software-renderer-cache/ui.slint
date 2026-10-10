@@ -1,0 +1,46 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+import "../screenshots/fonts/NotoSans-Regular.ttf";
+import "../screenshots/fonts/NotoSans-Italic.ttf";
+
+export component Ui inherits Window {
+    width: 240px; height: 240px; background: #121212;
+    in property <length> dy;
+    in property <length> dx: 7.5px;
+    in property <length> spacing: 0px;
+    in property <float> line-factor: 1;
+    in property <string> label: "Pocket mode";
+    in property <color> row-fill: #173252;
+    in property <color> ink: #ffffff;
+    in property <length> size: 23px;
+    in property <length> row-width: 178px;
+    in property <float> fade: 1.0;
+    in property <bool> italic: false;
+    in property <bool> wrap: false;
+    in property <bool> right: false;
+    in property <int> limit: 2;
+    Rectangle {
+        x: 21px; y: 29px; width: 198px; height: 158px; clip: true;
+        opacity: root.fade;
+        background: root.row-fill;
+        Text {
+            x: root.dx; y: root.dy; width: root.row-width; height: 70px;
+            text: root.label; color: root.ink;
+            font-family: "Noto Sans"; font-size: root.size;
+            letter-spacing: root.spacing; line-height-factor: root.line-factor;
+            font-italic: root.italic;
+            wrap: root.wrap ? word-wrap : no-wrap;
+            overflow: elide;
+            max-lines: root.limit;
+            horizontal-alignment: root.right ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
+            vertical-alignment: center;
+        }
+        Text {
+            x: root.dx; y: root.dy + 82px; width: root.row-width; height: 50px;
+            text: "Settings"; color: root.ink;
+            font-family: "Noto Sans"; font-size: root.size;
+            letter-spacing: root.spacing; line-height-factor: root.line-factor;
+        }
+    }
+}

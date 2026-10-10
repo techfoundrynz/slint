@@ -81,6 +81,8 @@ define_cargo_dependent_feature(renderer-skia-opengl "Enable support for the Skia
 define_cargo_dependent_feature(renderer-skia-vulkan "Enable support for the Skia based rendering engine with its Vulkan backend." OFF "NOT SLINT_FEATURE_FREESTANDING")
 define_cargo_dependent_feature(renderer-vello "Enable support for the WGPU based vello rendering engine. Experimental: it is never selected automatically, set SLINT_BACKEND=winit-vello or SLINT_BACKEND=linuxkms-vello to use it." OFF "NOT SLINT_FEATURE_FREESTANDING AND NOT ANDROID")
 define_cargo_feature(renderer-software "Enable support for the software renderer" ON)
+
+define_cargo_dependent_feature(software-renderer-caches "Enable bounded bitmap-text and RGB565 caches for devices with sufficient heap" OFF "SLINT_FEATURE_RENDERER_SOFTWARE")
 define_cargo_feature(software-renderer-path "Enable support for Path element rendering with the software renderer. This is implicitly enabled when SLINT_FEATURE_FREESTANDING is OFF. Enable this in bare-metal environments if you need support for Path elements" OFF)
 
 define_cargo_dependent_feature(backend-qt "Enable Qt based rendering backend" OFF "NOT SLINT_FEATURE_FREESTANDING AND NOT ANDROID")

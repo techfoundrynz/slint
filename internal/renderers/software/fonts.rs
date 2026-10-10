@@ -19,6 +19,7 @@ i_slint_core::thread_local! {
 pub enum GlyphAlphaMap {
     Static(&'static [u8]),
     Shared(Rc<[u8]>),
+    Cached(Rc<Vec<u8>>),
 }
 
 #[derive(Clone)]

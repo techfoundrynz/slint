@@ -208,6 +208,9 @@ renderer-skia-vulkan = ["i-slint-backend-selector/renderer-skia-vulkan", "dep:i-
 ## Same as `renderer-skia`, but compiles only Skia's CPU rendering path, without a GPU renderer.
 renderer-skia-software = ["i-slint-backend-selector/renderer-skia-software", "std"]
 
+## Enable bounded bitmap-text and RGB565 caches for devices with sufficient heap.
+software-renderer-caches = ["i-slint-renderer-software/embedded-caches"]
+
 ## Render using the software renderer.
 renderer-software = ["i-slint-backend-selector/renderer-software", "dep:i-slint-renderer-software"]
 

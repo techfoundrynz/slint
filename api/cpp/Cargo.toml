@@ -46,6 +46,9 @@ renderer-skia-opengl = ["i-slint-backend-selector/renderer-skia-opengl", "render
 renderer-skia-vulkan = ["i-slint-backend-selector/renderer-skia-vulkan", "renderer-skia"]
 renderer-vello = ["i-slint-backend-selector/renderer-vello"]
 renderer-software = ["i-slint-backend-selector/renderer-software", "dep:i-slint-renderer-software"]
+## Enable bounded bitmap-text and RGB565 caches for devices with sufficient heap.
+software-renderer-caches = ["i-slint-renderer-software/embedded-caches"]
+
 software-renderer-path = ["i-slint-renderer-software/path"]
 gettext = ["i-slint-core/gettext-rs"]
 accessibility = ["i-slint-backend-selector/accessibility"]

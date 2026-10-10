@@ -42,6 +42,26 @@ pub(super) fn draw_texture_line(
     extra_clip_begin: i16,
     extra_clip_end: i16,
 ) {
+    draw_texture_line_impl(
+        span,
+        line,
+        texture,
+        line_buffer,
+        extra_clip_begin,
+        extra_clip_end,
+        true,
+    );
+}
+
+fn draw_texture_line_impl(
+    span: &PhysicalRect,
+    line: PhysicalLength,
+    texture: &super::SceneTexture,
+    line_buffer: &mut [impl TargetPixel],
+    extra_clip_begin: i16,
+    extra_clip_end: i16,
+    fast_path: bool,
+) {
     let super::SceneTexture {
         data,
         format,
@@ -58,6 +78,26 @@ pub(super) fn draw_texture_line(
     let dx = Fixed::<i32, 8>::from_fixed(dx);
     let dy = Fixed::<i32, 8>::from_fixed(dy);
     let off_x = Fixed::<i32, 8>::from_fixed(off_x);
+
+    if fast_path
+        && format == TexturePixelFormat::AlphaMap
+        && rotation == super::RenderingRotation::NoRotation
+        && dx == Fixed::from_integer(1)
+    {
+        let row = off_y + dy * y;
+        let row_offset =
+            row.truncate().rem_euclid(source_size.height) as usize * pixel_stride as usize;
+        let column = wrap_fixed(
+            off_x + dx * extra_clip_begin as i32,
+            Fixed::from_integer(source_size.width),
+        )
+        .truncate() as usize;
+        if column + len <= source_size.width as usize {
+            let coverage = &data[row_offset + column..row_offset + column + len];
+            <_ as TargetPixel>::blend_alpha_mask(line_buffer, coverage, colorize, alpha);
+            return;
+        }
+    }
 
     if !rotation.is_transpose() {
         let mut delta = dx;
@@ -647,6 +687,26 @@ pub(super) fn draw_rounded_rectangle_line(
     extra_left_clip: i16,
     extra_right_clip: i16,
 ) {
+    draw_rounded_rectangle_line_impl(
+        span,
+        line,
+        rr,
+        line_buffer,
+        extra_left_clip,
+        extra_right_clip,
+        true,
+    );
+}
+
+fn draw_rounded_rectangle_line_impl(
+    span: &PhysicalRect,
+    line: PhysicalLength,
+    rr: &super::RoundedRectangle,
+    line_buffer: &mut [impl TargetPixel],
+    extra_left_clip: i16,
+    extra_right_clip: i16,
+    cache_corners: bool,
+) {
     /// This is an integer shifted by 4 bits.
     /// Note: this is not a "fixed point" because multiplication and sqrt operation operate to
     /// the shifted integer
@@ -707,7 +767,7 @@ pub(super) fn draw_rounded_rectangle_line(
         (Shifted::new(width) + Shifted::new(rr.right_clip.get() + extra_right_clip))
             .saturating_sub(x)
     };
-    let calculate_xxxx = |r: i16, y: i16| {
+    let calculate_uncached = |r: i16, y: i16| {
         let r = Shifted::new(r);
         // `y` is how far away from the center of the circle the current line is.
         let y = r - Shifted::new(y);
@@ -719,6 +779,55 @@ pub(super) fn draw_rounded_rectangle_line(
         let x4 = r - (r2 * r2).saturating_sub(y * y).sqrt();
         let x3 = r - (r2 * r2).saturating_sub((y - ONE) * (y - ONE)).sqrt();
         (x1, x2, x3, x4)
+    };
+
+    let calculate_xxxx = |r: i16, y: i16| {
+        if !cfg!(feature = "embedded-caches")
+            || !cache_corners
+            || !(1..=64).contains(&r)
+            || y < 0
+            || y >= r
+        {
+            return calculate_uncached(r, y);
+        }
+        let values = CORNER_TABLES.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let index = if let Some(i) =
+                cache.tables.iter().position(|t| t.radius == r && t.border == border.0)
+            {
+                i
+            } else {
+                if cache.tables.capacity() == 0 && cache.tables.try_reserve_exact(4).is_err() {
+                    let (a, b, c, d) = calculate_uncached(r, y);
+                    return [a.0, b.0, c.0, d.0];
+                }
+                if cache.tables.len() == 4 {
+                    let next = cache.next;
+                    cache.tables[next].radius = r;
+                    cache.tables[next].border = border.0;
+                    cache.tables[next].initialized = 0;
+                    cache.next = (next + 1) % 4;
+                    next
+                } else {
+                    cache.tables.push(CornerTable {
+                        radius: r,
+                        border: border.0,
+                        rows: [[0; 4]; 64],
+                        initialized: 0,
+                    });
+                    cache.tables.len() - 1
+                }
+            };
+            let table = &mut cache.tables[index];
+            let row = y as usize;
+            if table.initialized & (1u64 << row) == 0 {
+                let (a, b, c, d) = calculate_uncached(r, y);
+                table.rows[row] = [a.0, b.0, c.0, d.0];
+                table.initialized |= 1u64 << row;
+            }
+            table.rows[row]
+        });
+        (Shifted(values[0]), Shifted(values[1]), Shifted(values[2]), Shifted(values[3]))
     };
 
     let (x1, x2, x3, x4, x5, x6, x7, x8) = if let Some(r) = rr.radius.as_uniform() {
@@ -1529,6 +1638,10 @@ pub trait TargetPixel: Sized + Copy {
             }
         }
     }
+    /// Blends an alpha-map scanline with a color and global opacity.
+    fn blend_alpha_mask(slice: &mut [Self], coverage: &[u8], color: Color, alpha: u8) {
+        blend_alpha_mask_generic(slice, coverage, color, alpha);
+    }
     /// Create a pixel from the red, gree, blue component in the range 0..=255
     fn from_rgb(red: u8, green: u8, blue: u8) -> Self;
 
@@ -1730,6 +1843,73 @@ impl Rgb565BigEndianPixel {
 }
 
 impl TargetPixel for Rgb565BigEndianPixel {
+    fn blend_alpha_mask(slice: &mut [Self], coverage: &[u8], color: Color, alpha: u8) {
+        if alpha == 0 {
+            return;
+        }
+        if !cfg!(feature = "embedded-caches") || slice.len() < 32 {
+            blend_alpha_mask_generic(slice, coverage, color, alpha);
+            return;
+        }
+        let Some(background) = slice.first().copied() else {
+            return;
+        };
+        if !slice.iter().all(|p| p.0 == background.0) {
+            blend_alpha_mask_generic(slice, coverage, color, alpha);
+            return;
+        }
+        let key = AlphaPaletteKey {
+            background: background.0,
+            rgb: color.red() as u32 | (color.green() as u32) << 8 | (color.blue() as u32) << 16,
+            alpha,
+        };
+        let used = ALPHA_PALETTES.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            let index = if let Some(i) = cache.entries.iter().position(|p| p.key == key) {
+                i
+            } else {
+                if !cache.recent.contains(&Some(key)) {
+                    let next = cache.recent_next;
+                    cache.recent[next] = Some(key);
+                    cache.recent_next = (next + 1) % cache.recent.len();
+                    return false;
+                }
+                if cache.entries.capacity() == 0 && cache.entries.try_reserve_exact(8).is_err() {
+                    return false;
+                }
+                let values = core::array::from_fn(|coverage| {
+                    let coverage = (coverage as u16 * alpha as u16 / 255) as u8;
+                    let mut pixel = background;
+                    pixel.blend(PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
+                        coverage,
+                        color.red(),
+                        color.green(),
+                        color.blue(),
+                    )));
+                    pixel.0
+                });
+                let entry = AlphaPalette { key, values };
+                if cache.entries.len() == 8 {
+                    let next = cache.next;
+                    cache.entries[next] = entry;
+                    cache.next = (next + 1) % 8;
+                    next
+                } else {
+                    cache.entries.push(entry);
+                    cache.entries.len() - 1
+                }
+            };
+            for (pixel, &coverage) in slice.iter_mut().zip(coverage) {
+                if coverage != 0 {
+                    pixel.0 = cache.entries[index].values[coverage as usize];
+                }
+            }
+            true
+        });
+        if !used {
+            blend_alpha_mask_generic(slice, coverage, color, alpha);
+        }
+    }
     /// Same widening as the native-endian case: the fill value is byte-swapped once up
     /// front, so pairing pixels into 32-bit stores costs nothing extra here.
     fn blend_slice(slice: &mut [Self], color: PremultipliedRgbaColor) {
@@ -1825,4 +2005,396 @@ fn rgb565_be_blend() {
     let mut be = Rgb565BigEndianPixel::from_rgb(255, 255, 255);
     be.blend(color);
     assert_eq!(le.0.swap_bytes(), be.0);
+}
+
+#[cfg(test)]
+mod alpha_fast_path_tests {
+    use super::super::{RenderingRotation, SceneTexture, SceneTextureExtra};
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn fast_glyph_scanlines_match_generic_sampling() {
+        let data: alloc::vec::Vec<u8> =
+            (0..19 * 13).map(|i| [0, 255, 1, 254, 128, 77, 19][i % 7]).collect();
+        let span = PhysicalRect::new(euclid::point2(0, 0), euclid::size2(19, 13));
+        for rotation in [
+            RenderingRotation::NoRotation,
+            RenderingRotation::Rotate90,
+            RenderingRotation::Rotate180,
+            RenderingRotation::Rotate270,
+        ] {
+            for alpha in [0, 1, 127, 254, 255] {
+                for (dx, dy) in [(256, 256), (128, 256), (256, 128)] {
+                    for (ox, oy) in [(0, 0), (8, 4), (1, 15), (16, 16), (18 * 16, 0)] {
+                        let texture = SceneTexture {
+                            data: &data,
+                            pixel_stride: 19,
+                            format: TexturePixelFormat::AlphaMap,
+                            extra: SceneTextureExtra {
+                                colorize: Color::from_rgb_u8(31, 200, 97),
+                                alpha,
+                                rotation,
+                                dx: Fixed(dx),
+                                dy: Fixed(dy),
+                                off_x: Fixed(ox),
+                                off_y: Fixed(oy),
+                            },
+                        };
+                        for line in 0..13 {
+                            for begin in 0..19 {
+                                let len = (19 - begin).min(7) as usize;
+                                let mut fast = vec![Rgb565BigEndianPixel(0xdead); len];
+                                let mut generic = fast.clone();
+                                draw_texture_line_impl(
+                                    &span,
+                                    PhysicalLength::new(line),
+                                    &texture,
+                                    &mut fast,
+                                    begin,
+                                    0,
+                                    true,
+                                );
+                                draw_texture_line_impl(
+                                    &span,
+                                    PhysicalLength::new(line),
+                                    &texture,
+                                    &mut generic,
+                                    begin,
+                                    0,
+                                    false,
+                                );
+                                assert_eq!(
+                                    fast, generic,
+                                    "rotation={rotation:?} alpha={alpha} dx={dx} dy={dy} offset={ox},{oy} line={line} begin={begin}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn blend_alpha_mask_generic<P: TargetPixel>(
+    slice: &mut [P],
+    coverage: &[u8],
+    color: Color,
+    alpha: u8,
+) {
+    let opaque = P::from_rgb(color.red(), color.green(), color.blue());
+    for (pixel, &coverage) in slice.iter_mut().zip(coverage) {
+        let coverage =
+            if alpha == 255 { coverage } else { (coverage as u16 * alpha as u16 / 255) as u8 };
+        match coverage {
+            0 => {}
+            255 => *pixel = opaque,
+            coverage => pixel.blend(PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
+                coverage,
+                color.red(),
+                color.green(),
+                color.blue(),
+            ))),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct AlphaPaletteKey {
+    background: u16,
+    rgb: u32,
+    alpha: u8,
+}
+struct AlphaPalette {
+    key: AlphaPaletteKey,
+    values: [u16; 256],
+}
+#[derive(Default)]
+struct AlphaPaletteCache {
+    entries: alloc::vec::Vec<AlphaPalette>,
+    recent: [Option<AlphaPaletteKey>; 8],
+    recent_next: usize,
+    next: usize,
+}
+i_slint_core::thread_local! {
+    static ALPHA_PALETTES: core::cell::RefCell<AlphaPaletteCache> = core::cell::RefCell::default()
+}
+
+#[cfg(test)]
+mod alpha_palette_tests {
+    use super::*;
+    use alloc::vec;
+    #[test]
+    fn palettes_match_generic_blending_and_remain_bounded() {
+        let coverage: alloc::vec::Vec<u8> = (0..=255).collect();
+        for background in [0u16, 0xdead, 0xffff, 0x1234] {
+            for color in [
+                Color::from_rgb_u8(255, 255, 255),
+                Color::from_rgb_u8(154, 154, 154),
+                Color::from_rgb_u8(33, 150, 243),
+            ] {
+                for alpha in [1, 17, 128, 254, 255] {
+                    let mut actual = vec![Rgb565BigEndianPixel(background); 256];
+                    let mut expected = actual.clone();
+                    Rgb565BigEndianPixel::blend_alpha_mask(&mut actual, &coverage, color, alpha);
+                    actual.fill(Rgb565BigEndianPixel(background));
+                    Rgb565BigEndianPixel::blend_alpha_mask(&mut actual, &coverage, color, alpha);
+                    blend_alpha_mask_generic(&mut expected, &coverage, color, alpha);
+                    assert_eq!(actual, expected);
+                    ALPHA_PALETTES.with(|cache| assert!(cache.borrow().entries.len() <= 8));
+                    actual[33] = Rgb565BigEndianPixel(0xbeef);
+                    expected = actual.clone();
+                    Rgb565BigEndianPixel::blend_alpha_mask(&mut actual, &coverage, color, alpha);
+                    blend_alpha_mask_generic(&mut expected, &coverage, color, alpha);
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+    }
+}
+
+struct CornerTable {
+    radius: i16,
+    border: u32,
+    rows: [[u32; 4]; 64],
+    initialized: u64,
+}
+#[derive(Default)]
+struct CornerCache {
+    tables: alloc::vec::Vec<CornerTable>,
+    next: usize,
+}
+i_slint_core::thread_local! {
+    static CORNER_TABLES: core::cell::RefCell<CornerCache> = core::cell::RefCell::default()
+}
+
+#[cfg(test)]
+mod rounded_corner_cache_tests {
+    use super::*;
+    use alloc::vec;
+    #[test]
+    fn cached_corners_match_reference_with_clipping_and_colors() {
+        for radius in [1, 12, 23, 64, 65] {
+            for border in [0, 2, 5] {
+                for (left, right, top, bottom) in [(0, 0, 0, 0), (7, 11, 3, 9), (24, 25, 25, 26)] {
+                    let span = PhysicalRect::new(
+                        euclid::point2(left, top),
+                        euclid::size2(320 - left - right, 90 - top - bottom),
+                    );
+                    let rr = super::super::RoundedRectangle {
+                        radius: super::super::PhysicalBorderRadius::new(
+                            radius, radius, radius, radius,
+                        ),
+                        width: PhysicalLength::new(border),
+                        inner_color: PremultipliedRgbaColor {
+                            red: 37,
+                            green: 71,
+                            blue: 120,
+                            alpha: 255,
+                        },
+                        border_color: PremultipliedRgbaColor {
+                            red: 60,
+                            green: 30,
+                            blue: 80,
+                            alpha: 128,
+                        },
+                        left_clip: PhysicalLength::new(left),
+                        right_clip: PhysicalLength::new(right),
+                        top_clip: PhysicalLength::new(top),
+                        bottom_clip: PhysicalLength::new(bottom),
+                    };
+                    for line in span.min_y()..span.max_y() {
+                        for (extra_left, extra_right) in [(0, 0), (3, 5), (70, 90)] {
+                            let len = (span.width() - extra_left - extra_right) as usize;
+                            let mut cached = vec![Rgb565BigEndianPixel(0xdead); len];
+                            let mut reference = cached.clone();
+                            draw_rounded_rectangle_line_impl(
+                                &span,
+                                PhysicalLength::new(line),
+                                &rr,
+                                &mut cached,
+                                extra_left,
+                                extra_right,
+                                true,
+                            );
+                            draw_rounded_rectangle_line_impl(
+                                &span,
+                                PhysicalLength::new(line),
+                                &rr,
+                                &mut reference,
+                                extra_left,
+                                extra_right,
+                                false,
+                            );
+                            assert_eq!(
+                                cached, reference,
+                                "r={radius} border={border} line={line} clips={left},{right},{top},{bottom} extra={extra_left},{extra_right}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cache_admission_tests {
+    use super::*;
+    #[test]
+    fn palettes_require_reuse_and_skip_short_spans() {
+        ALPHA_PALETTES.with(|c| *c.borrow_mut() = AlphaPaletteCache::default());
+        let draw = |len, color| {
+            let mut pixels = alloc::vec![Rgb565BigEndianPixel(0x1234); len];
+            Rgb565BigEndianPixel::blend_alpha_mask(&mut pixels, &alloc::vec![127; len], color, 255);
+        };
+        for n in 0..100 {
+            draw(8, Color::from_rgb_u8(n, 23, 45));
+        }
+        ALPHA_PALETTES.with(|c| assert!(c.borrow().entries.is_empty()));
+        for n in 0..16 {
+            draw(256, Color::from_rgb_u8(n, 23, 45));
+        }
+        ALPHA_PALETTES.with(|c| assert!(c.borrow().entries.is_empty()));
+        let color = Color::from_rgb_u8(255, 255, 255);
+        draw(256, color);
+        ALPHA_PALETTES.with(|c| assert!(c.borrow().entries.is_empty()));
+        draw(256, color);
+        ALPHA_PALETTES.with(|c| {
+            assert_eq!(c.borrow().entries.len(), usize::from(cfg!(feature = "embedded-caches")));
+        });
+        for n in 0..20 {
+            let color = Color::from_rgb_u8(n, 100, 200);
+            draw(256, color);
+            draw(256, color);
+        }
+        ALPHA_PALETTES.with(|c| {
+            assert_eq!(
+                c.borrow().entries.len(),
+                if cfg!(feature = "embedded-caches") { 8 } else { 0 }
+            )
+        });
+    }
+    #[test]
+    fn corner_rows_are_lazy_and_eviction_resets_validity() {
+        CORNER_TABLES.with(|c| *c.borrow_mut() = CornerCache::default());
+        let span = PhysicalRect::new(euclid::point2(0, 0), euclid::size2(320, 90));
+        for radius in 12..22 {
+            let rr = super::super::RoundedRectangle {
+                radius: super::super::PhysicalBorderRadius::new(radius, radius, radius, radius),
+                width: PhysicalLength::new(2),
+                inner_color: PremultipliedRgbaColor { red: 37, green: 71, blue: 120, alpha: 255 },
+                border_color: PremultipliedRgbaColor { red: 60, green: 30, blue: 80, alpha: 128 },
+                left_clip: PhysicalLength::new(0),
+                right_clip: PhysicalLength::new(0),
+                top_clip: PhysicalLength::new(0),
+                bottom_clip: PhysicalLength::new(0),
+            };
+            let mut actual = alloc::vec![Rgb565BigEndianPixel(0xdead);320];
+            let mut expected = actual.clone();
+            draw_rounded_rectangle_line_impl(
+                &span,
+                PhysicalLength::new(0),
+                &rr,
+                &mut actual,
+                0,
+                0,
+                true,
+            );
+            draw_rounded_rectangle_line_impl(
+                &span,
+                PhysicalLength::new(0),
+                &rr,
+                &mut expected,
+                0,
+                0,
+                false,
+            );
+            assert_eq!(actual, expected);
+            CORNER_TABLES.with(|c| {
+                let cache = c.borrow();
+                assert!(cache.tables.len() <= 4);
+                if cfg!(feature = "embedded-caches") {
+                    assert_eq!(
+                        cache.tables.iter().find(|t| t.radius == radius).unwrap().initialized,
+                        1
+                    );
+                } else {
+                    assert!(cache.tables.is_empty());
+                }
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod alpha_mask_pixel_formats {
+    use super::super::{RenderingRotation, SceneTexture, SceneTextureExtra};
+    use super::*;
+    fn compare<P: TargetPixel + Copy + core::fmt::Debug>(equal: fn(&P, &P) -> bool) {
+        let data: alloc::vec::Vec<u8> =
+            (0..19 * 13).map(|i| [0, 255, 1, 254, 128, 77, 19][i % 7]).collect();
+        let span = PhysicalRect::new(euclid::point2(0, 0), euclid::size2(19, 13));
+        for background in [P::background(), P::from_rgb(67, 139, 218)] {
+            for alpha in [0, 1, 127, 254, 255] {
+                for (ox, oy) in [(0, 0), (8, 4), (1, 15), (18 * 16, 0)] {
+                    let texture = SceneTexture {
+                        data: &data,
+                        pixel_stride: 19,
+                        format: TexturePixelFormat::AlphaMap,
+                        extra: SceneTextureExtra {
+                            colorize: Color::from_rgb_u8(31, 200, 97),
+                            alpha,
+                            rotation: RenderingRotation::NoRotation,
+                            dx: Fixed(256),
+                            dy: Fixed(256),
+                            off_x: Fixed(ox),
+                            off_y: Fixed(oy),
+                        },
+                    };
+                    for line in 0..13 {
+                        for begin in 0..19 {
+                            let len = (19 - begin).min(11) as usize;
+                            let mut fast = alloc::vec![background;len];
+                            let mut reference = fast.clone();
+                            draw_texture_line_impl(
+                                &span,
+                                PhysicalLength::new(line),
+                                &texture,
+                                &mut fast,
+                                begin,
+                                0,
+                                true,
+                            );
+                            draw_texture_line_impl(
+                                &span,
+                                PhysicalLength::new(line),
+                                &texture,
+                                &mut reference,
+                                begin,
+                                0,
+                                false,
+                            );
+                            assert!(fast.iter().zip(&reference).all(|(a, b)| equal(a, b)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn rgb8_matches() {
+        compare::<Rgb8Pixel>(|a, b| a == b);
+    }
+    #[test]
+    fn rgba_matches() {
+        compare::<PremultipliedRgbaColor>(|a, b| {
+            (a.red, a.green, a.blue, a.alpha) == (b.red, b.green, b.blue, b.alpha)
+        });
+    }
+    #[test]
+    fn native_rgb565_matches() {
+        compare::<Rgb565Pixel>(|a, b| a == b);
+    }
 }

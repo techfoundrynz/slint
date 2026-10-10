@@ -30,10 +30,25 @@ env:
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
     # Must match the cargo features the firmware's CMakeLists requests. software-renderer-path
     # is required for Path/ArcTo, which the UI uses for arcs.
-    SLINT_MCU_FEATURES: "-DSLINT_FEATURE_FREESTANDING=ON -DSLINT_FEATURE_RENDERER_SOFTWARE=ON -DSLINT_FEATURE_SOFTWARE_RENDERER_PATH=ON"
+    SLINT_MCU_FEATURES: "-DSLINT_FEATURE_FREESTANDING=ON -DSLINT_FEATURE_RENDERER_SOFTWARE=ON -DSLINT_FEATURE_SOFTWARE_RENDERER_PATH=ON -DSLINT_FEATURE_SOFTWARE_RENDERER_CACHES=ON"
     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
+    renderer-tests:
+        name: software renderer tests
+        runs-on: ubuntu-22.04
+        steps:
+            - uses: actions/checkout@v6
+            - uses: ./.github/actions/install-linux-dependencies
+            - uses: dtolnay/rust-toolchain@stable
+            - run: cmake -P api/cpp/tests/check_software_cache_features.cmake
+            - run: cargo test --release -p i-slint-renderer-software --no-default-features --features std,testing --lib
+            - run: cargo test --release -p i-slint-renderer-software --no-default-features --features std,testing,embedded-caches --lib
+            - run: cargo test --release --manifest-path tests/software-renderer-cache/Cargo.toml
+            - run: cargo test --release --manifest-path tests/software-renderer-cache/Cargo.toml --no-default-features
+            - run: cargo test --release --manifest-path tests/software-renderer-cache/Cargo.toml --features vector-fonts
+            - run: cargo test --release --manifest-path tests/software-renderer-cache/Cargo.toml --features sdf-fonts
+
     library:
         name: libslint_cpp.a (${{ matrix.rust_target }})
         runs-on: ubuntu-22.04
@@ -120,7 +135,7 @@ jobs:
 
     release:
         name: publish release
-        needs: [library, host-binaries]
+        needs: [renderer-tests, library, host-binaries]
         runs-on: ubuntu-22.04
         if: startsWith(github.ref, 'refs/tags/')
         permissions:
