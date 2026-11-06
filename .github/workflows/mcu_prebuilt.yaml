@@ -64,7 +64,7 @@ jobs:
                     - idf_target: esp32p4
                       rust_target: riscv32imafc-esp-espidf
                       compiler_prefix: riscv32-esp-elf
-                      compiler_flags: "-march=rv32imafc_zicsr_zifencei_xesppie -mabi=ilp32f"
+                      compiler_flags: "-march=rv32imafc_zicsr_zifencei -mabi=ilp32f"
         steps:
             - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
