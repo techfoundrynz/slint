@@ -138,7 +138,7 @@ jobs:
                     - os: ubuntu-22.04
                       host: linux-x86_64
                       suffix: ""
-                    - os: macos-14
+                    - os: macos-15
                       host: macos-aarch64
                       suffix: ""
         steps:
