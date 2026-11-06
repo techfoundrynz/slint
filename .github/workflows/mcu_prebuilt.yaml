@@ -1,4 +1,4 @@
-# Publish prebuilt Slint binaries for the PubRemote firmware.
+# Publish prebuilt Slint binaries for ESP32 firmware.
 #
 # Consumers download these instead of building the Rust core, which removes the esp
 # Rust toolchain and a multi-minute cargo build from every firmware build.
@@ -41,6 +41,7 @@ jobs:
             - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
             - uses: dtolnay/rust-toolchain@stable
+            - run: python3 api/cpp/tests/test_mcu_package.py
             - run: cmake -P api/cpp/tests/check_software_cache_features.cmake
             - run: cargo test --release -p i-slint-renderer-software --no-default-features --features std,testing --lib
             - run: cargo test --release -p i-slint-renderer-software --no-default-features --features std,testing,embedded-caches --lib
@@ -58,6 +59,12 @@ jobs:
                 include:
                     - idf_target: esp32s3
                       rust_target: xtensa-esp32s3-none-elf
+                      compiler_prefix: xtensa-esp-elf
+                      compiler_flags: ""
+                    - idf_target: esp32p4
+                      rust_target: riscv32imafc-esp-espidf
+                      compiler_prefix: riscv32-esp-elf
+                      compiler_flags: "-march=rv32imafc_zicsr_zifencei_xesppie -mabi=ilp32f"
         steps:
             - uses: actions/checkout@v6
             - uses: ./.github/actions/install-linux-dependencies
@@ -72,34 +79,51 @@ jobs:
               run: |
                   source "$HOME/export-esp.sh"
                   echo "$PATH" >> "$GITHUB_PATH"
+            - uses: actions/setup-python@v6
+              if: matrix.idf_target == 'esp32p4'
+              with:
+                  python-version: '3.12'
+            - name: install RISC-V compiler
+              if: matrix.idf_target == 'esp32p4'
+              run: |
+                  python -m pip install platformio==6.2.0
+                  pio pkg install --global --tool 'platformio/toolchain-riscv32-esp@15.2.0+20251204'
+                  echo "$HOME/.platformio/packages/toolchain-riscv32-esp/bin" >> "$GITHUB_PATH"
             - name: prepare licenses
               working-directory: api/cpp/
-              run: bash -x ../../scripts/prepare_binary_package.sh ${{ runner.workspace }}/cppbuild
+              run: bash -x ../../scripts/prepare_binary_package.sh ${{ runner.temp }}/slint-cppbuild
             - name: configure and build
               uses: lukka/run-cmake@v3.4
               with:
                   cmakeListsOrSettingsJson: CMakeListsTxtAdvanced
                   cmakeListsTxtPath: CMakeLists.txt
-                  # The C compiler is only used so the generated cmake config records a 4-byte
-                  # pointer size; no C is actually compiled here.
                   cmakeAppendedArgs: >-
                       -GNinja -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
                       -DESP_PLATFORM=1 -DIDF_TARGET=${{ matrix.idf_target }}
                       -DRust_CARGO_TARGET=${{ matrix.rust_target }}
-                      -DCMAKE_C_COMPILER=xtensa-esp-elf-gcc -DCMAKE_AR=xtensa-esp-elf-ar
+                      -DCMAKE_C_COMPILER=${{ matrix.compiler_prefix }}-gcc
+                      -DCMAKE_CXX_COMPILER=${{ matrix.compiler_prefix }}-g++
+                      -DCMAKE_AR=${{ matrix.compiler_prefix }}-ar
+                      -DCMAKE_RANLIB=${{ matrix.compiler_prefix }}-ranlib
+                      -DCMAKE_STRIP=${{ matrix.compiler_prefix }}-strip
+                      -DCMAKE_C_FLAGS='${{ matrix.compiler_flags }}'
+                      -DCMAKE_CXX_FLAGS='${{ matrix.compiler_flags }}'
                       -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
                       -DSLINT_LIBRARY_CARGO_FLAGS='-Zbuild-std=core,alloc'
                       -DSLINT_COMPILER=download
                       ${{ env.SLINT_MCU_FEATURES }}
-                  buildDirectory: ${{ runner.workspace }}/cppbuild
+                  buildDirectory: ${{ runner.temp }}/slint-cppbuild
                   buildWithCMakeArgs: "--config Release"
             - name: cpack
-              working-directory: ${{ runner.workspace }}/cppbuild
+              working-directory: ${{ runner.temp }}/slint-cppbuild
               run: cpack -G TGZ
+            - name: validate MCU package
+              working-directory: ${{ runner.temp }}/slint-cppbuild
+              run: python3 "$GITHUB_WORKSPACE/scripts/validate_mcu_package.py" Slint-cpp-*-${{ matrix.rust_target }}.tar.gz --target ${{ matrix.rust_target }}
             - uses: actions/upload-artifact@v7
               with:
                   name: slint-cpp-${{ matrix.rust_target }}
-                  path: ${{ runner.workspace }}/cppbuild/Slint-cpp-*.tar.gz
+                  path: ${{ runner.temp }}/slint-cppbuild/Slint-cpp-*.tar.gz
 
     host-binaries:
         name: host binaries (${{ matrix.host }})
@@ -141,26 +165,36 @@ jobs:
         permissions:
             contents: write
         steps:
+            - uses: actions/checkout@v6
             - uses: actions/download-artifact@v8
               with:
                   path: artifacts
             - name: flatten and name the host binaries
               run: |
                   mkdir -p release
-                  find artifacts -name "Slint-cpp-*.tar.gz" -exec cp {} release/ \;
+                  for target in xtensa-esp32s3-none-elf riscv32imafc-esp-espidf; do
+                    archives=(artifacts/slint-cpp-$target/Slint-cpp-*-$target.tar.gz)
+                    test "${#archives[@]}" -eq 1
+                    test -f "${archives[0]}"
+                    python3 scripts/validate_mcu_package.py "${archives[0]}" --target "$target"
+                    cp "${archives[0]}" release/
+                  done
                   # Assets are named <tool>-<host>(.exe): the host tag has to be in the
                   # filename because a release is one flat namespace.
                   for host in windows-x86_64 linux-x86_64 macos-aarch64; do
                     dir="artifacts/host-binaries-$host"
-                    [ -d "$dir" ] || continue
+                    test -d "$dir"
                     case "$host" in windows-*) sfx=".exe" ;; *) sfx="" ;; esac
                     for tool in slint-compiler slint-lsp; do
                       src=$(find "$dir" -type f -name "$tool$sfx" | head -1)
-                      [ -z "$src" ] && continue
+                      test -n "$src"
                       cp "$src" "release/$tool-$host$sfx"
                     done
                   done
-                  ls -la release
+                  cd release
+                  sha256sum Slint-cpp-*.tar.gz slint-compiler-* slint-lsp-* > SHA256SUMS
+                  sha256sum --check SHA256SUMS
+                  ls -la
             - uses: softprops/action-gh-release@v2
               with:
                   files: release/*
